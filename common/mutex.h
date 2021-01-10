@@ -25,7 +25,7 @@
 #include <condition_variable>
 #include <mutex>
 
-#include "common/time.h"
+#include <boost/thread/pthread/shared_mutex.hpp>
 
 namespace static_map {
 namespace common {
@@ -82,12 +82,6 @@ class CAPABILITY("mutex") Mutex {
       mutex_->condition_.wait(lock_, predicate);
     }
 
-    template <typename Predicate>
-    bool AwaitWithTimeout(Predicate predicate, common::Duration timeout)
-        REQUIRES(this) {
-      return mutex_->condition_.wait_for(lock_, timeout, predicate);
-    }
-
    private:
     Mutex* mutex_;
     std::unique_lock<std::mutex> lock_;
@@ -99,6 +93,13 @@ class CAPABILITY("mutex") Mutex {
 };
 
 using MutexLocker = Mutex::Locker;
+
+/// read write mutex
+/// when there is no writing in progress, several thread can access (read) the
+/// memory at the same time
+using ReadWriteMutex = boost::shared_mutex;
+using ReadMutexLocker = boost::shared_lock<ReadWriteMutex>;
+using WriteMutexLocker = boost::upgrade_to_unique_lock<ReadWriteMutex>;
 
 }  // namespace common
 }  // namespace static_map

@@ -20,44 +20,25 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include "builder/data/data_collector.h"
+
 #include <memory>
 #include <utility>
 
-#include "builder/data_collector.h"
 #include "common/macro_defines.h"
 #include "common/math.h"
 #include "common/performance/simple_prof.h"
 #include "glog/logging.h"
-
 #include "pcl/io/pcd_io.h"
 
 namespace static_map {
+namespace data {
 
-template <typename DataTypeWithTime>
-std::pair<int, int> TimeStampBinarySearch(
-    const std::vector<DataTypeWithTime>& data_vector, const SimpleTime& time) {
-  int mid;
-  int start = 0;
-  int end = data_vector.size() - 1;
-  while (end - start > 1) {
-    mid = start + (end - start) / 2;
-    if (time < data_vector.at(mid).time) {
-      end = mid;
-    } else {
-      start = mid;
-    }
-  }
-  CHECK_EQ(end - start, 1);
-  return std::make_pair(start, end);
-}
-
-template <typename PointT>
-DataCollector<PointT>::DataCollector(
-    const DataCollectorOptions& options,
-    pre_processers::filter::Factory<PointT>* const filter)
+DataCollector::DataCollector(const DataCollectorOptions& options,
+                             pre_processers::filter::Factory* const filter)
     : options_(options),
       cloud_processing_thread_(
-          std::bind(&DataCollector<PointT>::CloudPreProcessing, this)),
+          std::bind(&DataCollector::CloudPreProcessing, this)),
       filter_factory_(filter),
       accumulated_cloud_count_(0) {
   // reserve the vectors for less memory copy when push_back
@@ -68,34 +49,28 @@ DataCollector<PointT>::DataCollector(
   odom_path_cloud_.points.reserve(reserve_size);
 }
 
-template <typename PointT>
-DataCollector<PointT>::~DataCollector() {
+DataCollector::~DataCollector() {
   kill_cloud_preprocessing_thread_ = true;
   if (cloud_processing_thread_.joinable()) {
     cloud_processing_thread_.join();
   }
 }
 
-template <typename PointT>
-void DataCollector<PointT>::RawGpsDataToFile(
-    const std::string& filename) const {
+void DataCollector::RawGpsDataToFile(const std::string& filename) const {
   if (!enu_path_cloud_.empty()) {
     PRINT_INFO_FMT("output raw gps data into file: %s", filename.c_str());
     pcl::io::savePCDFileBinaryCompressed(filename, enu_path_cloud_);
   }
 }
 
-template <typename PointT>
-void DataCollector<PointT>::RawOdomDataToFile(
-    const std::string& filename) const {
+void DataCollector::RawOdomDataToFile(const std::string& filename) const {
   if (!odom_path_cloud_.empty()) {
     PRINT_INFO_FMT("output raw odom data into file: %s", filename.c_str());
     pcl::io::savePCDFileBinaryCompressed(filename, odom_path_cloud_);
   }
 }
 
-template <typename PointT>
-void DataCollector<PointT>::AddSensorData(const sensors::ImuMsg& imu_msg) {
+void DataCollector::AddSensorData(const ImuMsg& imu_msg) {
   ImuData imu_data;
   imu_data.time = imu_msg.header.stamp;
   imu_data.acceleration = imu_msg.linear_acceleration;
@@ -105,13 +80,11 @@ void DataCollector<PointT>::AddSensorData(const sensors::ImuMsg& imu_msg) {
   imu_data_.push_back(imu_data);
 }
 
-template <typename PointT>
-void DataCollector<PointT>::AddSensorData(
-    const sensors::NavSatFixMsg& navsat_msg) {
+void DataCollector::AddSensorData(const NavSatFixMsg& navsat_msg) {
   Locker locker(mutex_[kGpsData]);
   GpsData data;
   // save all data and its status
-  data.status_fixed = (navsat_msg.status.status == sensors::STATUS_FIX);
+  data.status_fixed = (navsat_msg.status.status == data::STATUS_FIX);
   data.time = navsat_msg.header.stamp;
 
   if (!reference_gps_point_.is_initialized()) {
@@ -144,82 +117,32 @@ void DataCollector<PointT>::AddSensorData(
   enu_path_cloud_.push_back(path_point);
 }
 
-template <typename PointT>
-void DataCollector<PointT>::AddSensorData(const PointCloudPtr& cloud) {
-  // accumulating clouds into one
-  if (options_.accumulate_cloud_num > 1) {
-    // "+=" will update the time stamp of accumulated_point_cloud_
-    // so, no need to manually copy the time stamp from pointcloud to
-    // accumulated_point_cloud_
-    if (accumulated_cloud_count_ == 0) {
-      accumulated_point_cloud_.reset(new PointCloudType);
-      first_time_in_accmulated_cloud_ = ToLocalTime(cloud->header.stamp);
-    }
-    *accumulated_point_cloud_ += *cloud;
-    accumulated_cloud_count_++;
-    if (accumulated_cloud_count_ < options_.accumulate_cloud_num) {
-      return;
-    }
-  } else {
-    accumulated_point_cloud_.reset();
-    accumulated_point_cloud_ = cloud;
-    first_time_in_accmulated_cloud_ = ToLocalTime(cloud->header.stamp);
-  }
-
-  PointCloudData data_before_processing;
-  data_before_processing.time = first_time_in_accmulated_cloud_;
-  data_before_processing.cloud.reset(new PointCloudType);
-  *data_before_processing.cloud = *accumulated_point_cloud_;
-  data_before_processing.cloud->header.stamp =
-      first_time_in_accmulated_cloud_.toNSec() / 1000ull;
-
-  cloud->points.clear();
-  cloud->points.shrink_to_fit();
-  accumulated_cloud_count_ = 0;
-
-  Locker locker(mutex_[kPointCloudData]);
-  cloud_data_before_preprocessing_.push_back(data_before_processing);
-}
-
-template <typename PointT>
-void DataCollector<PointT>::CloudPreProcessing() {
+void DataCollector::CloudPreProcessing() {
   while (true) {
     if (kill_cloud_preprocessing_thread_) {
       break;
     }
-    if (cloud_data_before_preprocessing_.size() < 2) {
-      SimpleTime::from_sec(0.005).sleep();
+    if (cloud_data_before_preprocessing_.empty()) {
+      SimpleTime::FromSec(0.005).Sleep();
       continue;
     }
 
-    SimpleTime next_data_time;
-    PointCloudData data;
+    InnerCloudType::Ptr data;
     {
       Locker locker(mutex_[kPointCloudData]);
       data = cloud_data_before_preprocessing_.front();
       cloud_data_before_preprocessing_.pop_front();
+    }
 
-      next_data_time = cloud_data_before_preprocessing_.front().time;
-    }
-    data.delta_time_in_cloud = (next_data_time - data.time).toSec();
     // filtering cloud
-    PointCloudPtr filtered_cloud(new PointCloudType);
-    {
-      REGISTER_BLOCK("Filtering Cloud");
-      filter_factory_->SetInputCloud(data.cloud);
-      filter_factory_->Filter(filtered_cloud);
-    }
+    InnerCloudType::Ptr filtered_cloud(new InnerCloudType);
+    filter_factory_->SetInputCloud(data);
+    filter_factory_->Filter(filtered_cloud);
+    CHECK(data->stamp == filtered_cloud->stamp);
+
     // insert new data
     Locker locker(mutex_[kPointCloudData]);
-    data.cloud = filtered_cloud;
-    cloud_data_.push_back(data);
-
-    // LOG(INFO) << data.time.toNSec() << " "
-    //           << sensors::ToLocalTime(data.cloud->header.stamp).toNSec() << "
-    //           "
-    //           << data.delta_time_in_cloud;
-
-    CHECK(data.time == ToLocalTime(data.cloud->header.stamp));
+    cloud_data_.push_back(filtered_cloud);
 
     // just for debug
     got_clouds_count_++;
@@ -231,28 +154,23 @@ void DataCollector<PointT>::CloudPreProcessing() {
   }
 }
 
-template <typename PointT>
-typename DataCollector<PointT>::PointCloudPtr
-DataCollector<PointT>::GetNewCloud(float* const delta_time) {
+InnerCloudType::Ptr DataCollector::GetNewCloud() {
   Locker locker(mutex_[kPointCloudData]);
   if (cloud_data_.empty()) {
     return nullptr;
   }
 
-  PointCloudPtr cloud = cloud_data_.front().cloud;
-  *delta_time = cloud_data_.front().delta_time_in_cloud;
+  auto ret = cloud_data_.front();
   cloud_data_.pop_front();
-  return cloud;
+  return ret;
 }
 
-template <typename PointT>
-size_t DataCollector<PointT>::GetRemainingCloudSize() {
+size_t DataCollector::GetRemainingCloudSize() {
   Locker locker(mutex_[kPointCloudData]);
   return cloud_data_.size();
 }
 
-template <typename PointT>
-void DataCollector<PointT>::AddSensorData(const sensors::OdomMsg& odom_msg) {
+void DataCollector::AddSensorData(const OdomMsg& odom_msg) {
   Locker locker(mutex_[kOdometryData]);
   OdometryData data;
   data.time = odom_msg.header.stamp;
@@ -274,8 +192,7 @@ void DataCollector<PointT>::AddSensorData(const sensors::OdomMsg& odom_msg) {
   odom_path_cloud_.push_back(odom_point);
 }
 
-template <typename PointT>
-std::unique_ptr<Eigen::Vector3d> DataCollector<PointT>::InterpolateGps(
+std::unique_ptr<Eigen::Vector3d> DataCollector::InterpolateGps(
     const SimpleTime& time, double time_threshold, bool trim_data) {
   CHECK_LE(time_threshold, 0.5);
   GpsData former_data;
@@ -288,7 +205,7 @@ std::unique_ptr<Eigen::Vector3d> DataCollector<PointT>::InterpolateGps(
       return nullptr;
     } else if (gps_data_.size() == 1) {
       // size == 1
-      if (std::fabs(time.toSec() - gps_data_[0].time.toSec()) <=
+      if (std::fabs(time.ToSec() - gps_data_[0].time.ToSec()) <=
               time_threshold &&
           gps_data_[0].status_fixed) {
         return std::make_unique<Eigen::Vector3d>(gps_data_[0].enu_position);
@@ -311,27 +228,22 @@ std::unique_ptr<Eigen::Vector3d> DataCollector<PointT>::InterpolateGps(
     }
   }
 
-  const double delta_time = (latter_data.time - former_data.time).toSec();
+  CHECK(time >= former_data.time && time <= latter_data.time);
+  const double delta_time = (latter_data.time - former_data.time).ToSec();
   CHECK_GT(delta_time, 1.e-6);
-  if (delta_time > 1.) {
-    PRINT_WARNING("some thing wrong with the search");
+  if (delta_time > 0.2 || !former_data.status_fixed ||
+      !latter_data.status_fixed) {
     return nullptr;
   }
 
-  CHECK(time >= former_data.time && time <= latter_data.time);
-  if (!former_data.status_fixed || !latter_data.status_fixed) {
-    // PRINT_WARNING("no fixed gps data at this time.");
-    return nullptr;
-  }
-  const double factor = (time - former_data.time).toSec() / delta_time;
+  const double factor = (time - former_data.time).ToSec() / delta_time;
   CHECK(factor >= 0. && factor <= 1.);
   const Eigen::Vector3d delta =
       factor * (latter_data.enu_position - former_data.enu_position);
   return std::make_unique<Eigen::Vector3d>(former_data.enu_position + delta);
 }
 
-template <typename PointT>
-std::unique_ptr<Eigen::Matrix4d> DataCollector<PointT>::InterpolateOdom(
+std::unique_ptr<Eigen::Matrix4d> DataCollector::InterpolateOdom(
     const SimpleTime& time, double time_threshold, bool trim_data) {
   CHECK_LE(time_threshold, 0.5);
   OdometryData former_data;
@@ -344,7 +256,7 @@ std::unique_ptr<Eigen::Matrix4d> DataCollector<PointT>::InterpolateOdom(
       return nullptr;
     } else if (odom_data_.size() == 1) {
       // size == 1
-      if (std::fabs(time.toSec() - odom_data_[0].time.toSec()) <=
+      if (std::fabs(time.ToSec() - odom_data_[0].time.ToSec()) <=
           time_threshold) {
         return std::make_unique<Eigen::Matrix4d>(odom_data_[0].pose);
       } else {
@@ -367,14 +279,14 @@ std::unique_ptr<Eigen::Matrix4d> DataCollector<PointT>::InterpolateOdom(
     }
   }
 
-  const double delta_time = (latter_data.time - former_data.time).toSec();
+  const double delta_time = (latter_data.time - former_data.time).ToSec();
   CHECK_GT(delta_time, 1.e-6);
   if (delta_time > 1.) {
     PRINT_WARNING("some thing wrong with the search");
     return nullptr;
   }
   CHECK(time >= former_data.time && time <= latter_data.time);
-  const double factor = (time - former_data.time).toSec() / delta_time;
+  const double factor = (time - former_data.time).ToSec() / delta_time;
   CHECK(factor >= 0. && factor <= 1.);
   // interpolate the data for more accurate odom data
   const Eigen::Matrix4d pose =
@@ -382,15 +294,13 @@ std::unique_ptr<Eigen::Matrix4d> DataCollector<PointT>::InterpolateOdom(
   return std::make_unique<Eigen::Matrix4d>(pose);
 }
 
-template <typename PointT>
-boost::optional<GeographicLib::LocalCartesian>
-DataCollector<PointT>::GetGpsReference() const {
+boost::optional<GeographicLib::LocalCartesian> DataCollector::GetGpsReference()
+    const {
   return reference_gps_point_;
 }
 
-template <typename PointT>
-void DataCollector<PointT>::TrimSensorData(const SensorDataType type,
-                                           const SimpleTime& time) {
+void DataCollector::TrimSensorData(const SensorDataType type,
+                                   const SimpleTime& time) {
   switch (type) {
     case SensorDataType::kImuData:
       TrimImuData(time);
@@ -406,13 +316,11 @@ void DataCollector<PointT>::TrimSensorData(const SensorDataType type,
   }
 }
 
-template <typename PointT>
-void DataCollector<PointT>::ClearAllCloud() {
+void DataCollector::ClearAllCloud() {
   Locker locker(mutex_[kPointCloudData]);
   // clear all source clouds
-  for (auto& frame : cloud_data_) {
-    frame.cloud->points.clear();
-    frame.cloud->points.shrink_to_fit();
+  for (auto& inner_cloud : cloud_data_) {
+    inner_cloud.reset();
   }
   cloud_data_.clear();
   cloud_data_.shrink_to_fit();
@@ -431,20 +339,17 @@ void DataCollector<PointT>::ClearAllCloud() {
   }                                         \
   data_vector.erase(data_vector.begin(), data_vector.begin() + i);
 
-template <typename PointT>
-void DataCollector<PointT>::TrimGpsData(const SimpleTime& time) {
+void DataCollector::TrimGpsData(const SimpleTime& time) {
   Locker locker(mutex_[kGpsData]);
   TRIM_DATA(gps_data_);
 }
 
-template <typename PointT>
-void DataCollector<PointT>::TrimImuData(const SimpleTime& time) {
+void DataCollector::TrimImuData(const SimpleTime& time) {
   Locker locker(mutex_[kImuData]);
   TRIM_DATA(imu_data_);
 }
 
 #undef TRIM_DATA
 
-template class DataCollector<pcl::PointXYZI>;
-
+}  // namespace data
 }  // namespace static_map

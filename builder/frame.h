@@ -35,48 +35,31 @@ struct FrameId {
   int32_t submap_index;
   int32_t frame_index;  // in submap
 
-  bool operator==(const FrameId& other) const {
-    return (trajectory_index == other.trajectory_index &&
-            submap_index == other.submap_index &&
-            frame_index == other.frame_index);
-  }
+  // Operators
+  bool operator==(const FrameId& other) const;
+  bool operator!=(const FrameId& other) const;
+  bool operator<(const FrameId& other) const;
 
-  bool operator!=(const FrameId& other) const { return !operator==(other); }
-
-  bool operator<(const FrameId& other) const {
-    return std::forward_as_tuple(trajectory_index, submap_index, frame_index) <
-           std::forward_as_tuple(other.trajectory_index, other.submap_index,
-                                 other.frame_index);
-  }
-
-  std::string DebugString() const {
-    std::ostringstream out;
-    out << "frame" << trajectory_index << "_" << submap_index << "_"
-        << frame_index;
-    return out.str();
-  }
+  std::string DebugString() const;
 };
 
-template <typename PointType>
-class Frame : public FrameBase<PointType> {
+class Frame : public FrameBase {
  public:
-  using PointCloudType = pcl::PointCloud<PointType>;
-  using PointCloudPtr = typename PointCloudType::Ptr;
-  using PointCloudConstPtr = typename PointCloudType::ConstPtr;
+  using InnerCloudPtr = typename data::InnerPointCloudData::Ptr;
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-  Frame() : FrameBase<PointType>() {}
-  ~Frame() {}
+  Frame();
+  ~Frame() = default;
 
-  Frame(const Frame&) = delete;
-  Frame& operator=(const Frame&) = delete;
-
-  FrameId id_;
+  PROHIBIT_COPY_AND_ASSIGN(Frame);
 
   void ToPcdFile(const std::string& filename) override;
 
-  PointCloudPtr Cloud() override;
+  InnerCloudPtr Cloud() override;
+
+ public:
+  FrameId id_;
 };
 
 }  // namespace static_map

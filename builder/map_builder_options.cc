@@ -21,7 +21,9 @@
 // SOFTWARE.
 
 #include "builder/map_builder.h"
-#include "common/pugixml.hpp"
+
+#include "common/file_utils.h"
+#include "pugixml/pugixml.hpp"
 
 namespace static_map {
 
@@ -112,10 +114,25 @@ MapBuilderOptions& MapBuilder::Initialise(const char* config_file_name) {
   using std::string;
   GET_SINGLE_OPTION(static_map_node, "whole_options", "export_file_path",
                     whole_options.export_file_path, string, string);
+  CHECK(common::CreateDir(whole_options.export_file_path)) << strerror(errno);
+
   GET_SINGLE_OPTION(static_map_node, "whole_options", "map_package_path",
                     whole_options.map_package_path, string, string);
+  CHECK(common::CreateDir(whole_options.map_package_path)) << strerror(errno);
+
   GET_SINGLE_OPTION(static_map_node, "whole_options", "odom_calib_mode",
                     whole_options.odom_calib_mode, int, OdomCalibrationMode);
+
+  GET_SINGLE_OPTION(static_map_node, "whole_options", "separate_output",
+                    whole_options.separate_output, bool, bool);
+  GET_SINGLE_OPTION(static_map_node, "whole_options",
+                    "output_direct_combined_map",
+                    whole_options.output_direct_combined_map, bool, bool);
+  GET_SINGLE_OPTION(static_map_node, "whole_options", "output_mrvm",
+                    whole_options.output_mrvm, bool, bool);
+  GET_SINGLE_OPTION(static_map_node, "whole_options", "separate_step",
+                    whole_options.separate_step, int, int);
+
   std::cout << std::endl;
 
   auto& output_mrvm_settings = options_.output_mrvm_settings;
@@ -184,7 +201,7 @@ MapBuilderOptions& MapBuilder::Initialise(const char* config_file_name) {
     GET_SINGLE_OPTION(front_end_node, "imu_options", "use_imu",
                       imu_options.enabled, bool, bool);
     GET_SINGLE_OPTION(front_end_node, "imu_options", "type", imu_options.type,
-                      int, sensors::ImuType);
+                      int, data::ImuType);
     GET_SINGLE_OPTION(front_end_node, "imu_options", "imu_frequency",
                       imu_options.frequency, float, float);
     GET_SINGLE_OPTION(front_end_node, "imu_options", "gravity_constant",
@@ -204,9 +221,6 @@ MapBuilderOptions& MapBuilder::Initialise(const char* config_file_name) {
                       submap_options.frame_count, int, int32_t);
     GET_SINGLE_OPTION(back_end_node, "submap_options", "enable_inner_mrvm",
                       submap_options.enable_inner_mrvm, bool, bool);
-    GET_SINGLE_OPTION(back_end_node, "submap_options",
-                      "enable_inner_multiview_icp",
-                      submap_options.enable_inner_multiview_icp, bool, bool);
     GET_SINGLE_OPTION(back_end_node, "submap_options", "enable_voxel_filter",
                       submap_options.enable_voxel_filter, bool, bool);
     GET_SINGLE_OPTION(back_end_node, "submap_options",
@@ -234,6 +248,18 @@ MapBuilderOptions& MapBuilder::Initialise(const char* config_file_name) {
     GET_SINGLE_OPTION(back_end_node, "isam_optimizer_options",
                       "output_graph_pic",
                       isam_optimizer_options.output_graph_pic, bool, bool);
+    GET_SINGLE_OPTION(
+        back_end_node, "isam_optimizer_options", "enable_extrinsic_calib",
+        isam_optimizer_options.enable_extrinsic_calib, bool, bool);
+    GET_SINGLE_OPTION(back_end_node, "isam_optimizer_options",
+                      "gps_factor_init_num",
+                      isam_optimizer_options.gps_factor_init_num, int, int);
+    GET_SINGLE_OPTION(back_end_node, "isam_optimizer_options",
+                      "gps_factor_sample_step",
+                      isam_optimizer_options.gps_factor_sample_step, int, int);
+    GET_SINGLE_OPTION(
+        back_end_node, "isam_optimizer_options", "gps_factor_init_angle_rad",
+        isam_optimizer_options.gps_factor_init_angle_rad, double, double);
 
     auto& loop_detector_setting =
         options_.back_end_options.loop_detector_setting;

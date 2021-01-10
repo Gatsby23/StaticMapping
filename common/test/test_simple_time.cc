@@ -20,35 +20,44 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "common/time.h"
-#include <string>
+#include "common/simple_time.h"
+#define BOOST_TEST_MODULE SimpleTimeTest
+#include <boost/test/unit_test.hpp>
 
 namespace static_map {
-namespace common {
 
-Duration FromSeconds(const double seconds) {
-  return std::chrono::duration_cast<Duration>(
-      std::chrono::duration<double>(seconds));
+struct TestDataStruct {
+  SimpleTime time;
+  int i = 0;
+};
+
+BOOST_AUTO_TEST_CASE(BinarySearch) {
+  std::vector<TestDataStruct> test_vec;
+  for (int i = 1; i <= 20; ++i) {
+    test_vec.push_back({SimpleTime::FromSec(0.1 * i), i});
+  }
+  {
+    const auto pair =
+        TimeStampBinarySearch(test_vec, SimpleTime::FromSec(0.25));
+    BOOST_CHECK_EQUAL(pair.first, 1);
+    BOOST_CHECK_EQUAL(pair.second, 2);
+  }
+  {
+    const auto pair =
+        TimeStampBinarySearch(test_vec, SimpleTime::FromSec(0.35));
+    BOOST_CHECK_EQUAL(pair.first, 2);
+    BOOST_CHECK_EQUAL(pair.second, 3);
+  }
+  {
+    const auto pair = TimeStampBinarySearch(test_vec, SimpleTime::FromSec(0.4));
+    BOOST_CHECK_EQUAL(pair.first, 3);
+    BOOST_CHECK_EQUAL(pair.second, 4);
+  }
+  {
+    const auto pair = TimeStampBinarySearch(test_vec, SimpleTime::FromSec(0.5));
+    BOOST_CHECK_EQUAL(pair.first, 4);
+    BOOST_CHECK_EQUAL(pair.second, 5);
+  }
 }
 
-double ToSeconds(const Duration duration) {
-  return std::chrono::duration_cast<std::chrono::duration<double>>(duration)
-      .count();
-}
-
-Time FromUniversal(const int64_t ticks) { return Time(Duration(ticks)); }
-
-int64_t ToUniversal(const Time time) { return time.time_since_epoch().count(); }
-
-std::ostream& operator<<(std::ostream& os, const Time time) {
-  os << std::to_string(ToUniversal(time));
-  return os;
-}
-
-common::Duration FromMilliseconds(const int64_t milliseconds) {
-  return std::chrono::duration_cast<Duration>(
-      std::chrono::milliseconds(milliseconds));
-}
-
-}  // namespace common
 }  // namespace static_map

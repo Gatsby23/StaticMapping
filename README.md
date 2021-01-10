@@ -11,6 +11,9 @@
 # Map with kitti dataset
 <img src="doc/kitti_rgb.png" width="800" />
 
+# Indoor mapping example (garage)
+<img src="doc/garage.png" width="800" />
+
 # Build
 > For now, It is recommended to build this repo in your host device but not in docker, due to that the docker image is not enough tested.
 ## Using host device
@@ -53,8 +56,9 @@ cd your_own_workspace
 ### compiling
 ```bash
 mkdir build && cd build
-cmake ..
+cmake -DENABLE_TEST=ON ..
 make -j8
+make check # optional, only if you want to check the code with unit tests.
 ```
 
 ## Using Docker 
@@ -68,7 +72,7 @@ docker pull registry.cn-hangzhou.aliyuncs.com/edward_slam/static_mapping:master_
 ```
 or you can build it on your own device 
 ```docker
-docker build --rm -t slam/static_mapping:latest . 
+docker build --rm -t slam/static_mapping:latest . --file Dockerfile.bionic
 ```
 
 #### For somewhere else
@@ -79,7 +83,7 @@ RUN sh -c '. /etc/lsb-release && echo "deb http://mirrors.tuna.tsinghua.edu.cn/r
 ```
 then, you can build it on your own using
 ```docker
-docker build --rm -t slam/static_mapping:latest . 
+docker build --rm -t slam/static_mapping:latest . --file Dockerfile.bionic
 ```
 
 ### Build in docker 
@@ -89,8 +93,7 @@ git clone https://github.com/EdwardLiuyc/StaticMapping.git
 cd StaticMapping
 
 ## start the docker container
-docker run -it --rm -v `pwd`:'/home/docker/src/StaticMapping' \
-  registry.cn-hangzhou.aliyuncs.com/edward_slam/static_mapping:master_bionic_latest /bin/bash
+docker run -it --rm -v /mnt:/mnt registry.cn-hangzhou.aliyuncs.com/edward_slam/static_mapping:master_bionic_latest /bin/bash
 
 ## in the container 
 mkdir -p build && cd build
@@ -103,14 +106,14 @@ perhaps you would meet some error like ` conflicting declaration ‘typedef stru
 # How to use?
 ## step0 Read wiki
 > There are very essential explanations in [wiki](https://github.com/EdwardLiuyc/StaticMapping/wiki) page. Read them first.
+> For Now, mapping with gps or odom would not be a good choice since that I have not run enough test on them.
 
 ## step1 run the mapping process
 ```bash
-mkdir pcd
-mkdir -p pkgs/test
 ./mapping.sh
 ```
-before that, you should kown what is in the script:
+
+before that, you should know what is in the script:
 ```bash
 ## usally, you can leave this config file just like this, it will work fine
 CONFIG_PATH=./config/static_mapping_default.xml
@@ -161,9 +164,6 @@ Finally, you will get a static map like this:
 part of it:  
 <img src="doc/detail.png" width="800" />  
 
-another example indoor(garage):  
-<img src="doc/garage.png" width="800" />
-
 # Document  
 You can use `doxygen Doxyfile` to generate your docs, they are in the `doc` folder.
 
@@ -175,12 +175,26 @@ You can use `doxygen Doxyfile` to generate your docs, they are in the `doc` fold
 
 # TODO
 - **Loop Close factor should be rubust**
-- **using docker to run**
+- compare IcpUsingPointMatcher & IcpFast -> what's the exact difference.
+- some examples for ground removal2
+- ground removal recovery mode
+- new loop detection methods
+- sort out the mutex in inner cloud data types
+- serialization and deserialization for inner cloud type (more elegant way)
+- loop edges trimmer
+- add filter api for init some of the config parameters
+- yaml configs
+- more feature as heartbeat
+- add odom to pose extrapolater
+- latter combine for frames (if read from file) / save raw cloud
 - another mode for the imu which provides attitude
-- trajectory and loop closure edges in rviz
+- may remove libpointmather
+- Qt tool for viewing pcd files
+- Qt wrapper like rviz
+- Fix bug with loop-detector using gps
 - Kitti evaluation
-- separate normal estimation from icp_fast, then we can no longer do it again in submap matching
 - seperate map_builder class into several smaller classes : map_option_loader / front_end / back_end
+- use one thread-pool to take care of all threads
 - preprocessor: remove points under the ground
 - Fix bug for bool parameters of registrators
 - use glog or other logging lib instead of print macro
@@ -188,12 +202,13 @@ You can use `doxygen Doxyfile` to generate your docs, they are in the `doc` fold
 - mrvp using cuda or opencl
 - **supporting multi-lidars**
 - perhaps need a brand-new data type for pointcloud 
-- save submap binary data into a special format file not just pointcloud into .pcd
-- save the frame clouds instead of submap clouds
 - filtering the cars directly at the input of the pointclouds
 - **add imu integrating factor in backend**
 - culling data structures like ImuMsg, NavSatMsg, etc.
 - add tests 
+  - filters
+  - registrators
+  - math functions
 - **lidar motion compensation after optimization**
 - lidar motion compensation inside ICP
 - Normal estimation using GPU
@@ -207,7 +222,6 @@ You can use `doxygen Doxyfile` to generate your docs, they are in the `doc` fold
 - - will try ekf or some other ways
 - read GPS noise(and other sensors' noise) from config files
 - add support for different kind of IMU and ODOM
-- add support for more kind of pointclouds
 - add a Pose3d struct for simple operation of matrix4f or just use gtsam::pose3d
 - mrvm output to a special format data file and can be transformed to pcd independently
 - gravity alignment (in pose extrapolator)
@@ -216,7 +230,6 @@ You can use `doxygen Doxyfile` to generate your docs, they are in the `doc` fold
 - full support for all kinds of pointcloud
 - totally independent with ROS
 - try SQlite to manage submap memory
-- isam optimizer should not be involved with pointcloud type
 - Introduce a PoseGraph class to handle all things for back-end
 
 ## Something involved with multi-trajectory-situation

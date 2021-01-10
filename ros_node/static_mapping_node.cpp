@@ -44,13 +44,18 @@
 #include "ros_node/msg_conversion.h"
 #include "ros_node/playable_bag.h"
 #include "ros_node/tf_bridge.h"
+#include "tf/transform_broadcaster.h"
 
 using static_map::MapBuilder;
 static MapBuilder::Ptr map_builder;
 
-using static_map::sensors::ImuMsg;
-using static_map::sensors::NavSatFixMsg;
-using static_map::sensors::OdomMsg;
+using static_map::data::ImuMsg;
+using static_map::data::NavSatFixMsg;
+using static_map::data::OdomMsg;
+
+namespace {
+
+constexpr char kMapFrameId[] = "/map";
 
 void pointcloud_callback(const sensor_msgs::PointCloud2::ConstPtr& msg) {
   pcl::PCLPointCloud2 pcl_pc2;
@@ -80,6 +85,8 @@ void gps_callback(const sensor_msgs::NavSatFix& gps_msg) {
   *local_gps = static_map_ros::ToLocalNavSatMsg(gps_msg);
   map_builder->InsertGpsMsg(local_gps);
 }
+
+}  // namespace
 
 int main(int argc, char** argv) {
   ros::init(argc, argv, "static_mapping_node");
@@ -166,6 +173,8 @@ int main(int argc, char** argv) {
   // default: base_link
   std::string tracking_frame = "base_link";
   pcl::console::parse_argument(argc, argv, "-track", tracking_frame);
+  CHECK(!tracking_frame.empty())
+      << "tracking frame id should be set." << std::endl;
 
   // ros bag
   std::string bag_file = "";
@@ -199,33 +208,49 @@ int main(int argc, char** argv) {
       n.advertise<visualization_msgs::Marker>("/submap_pose", 1);
   ros::Publisher path_pub =
       n.advertise<nav_msgs::Path>("/static_mapping_path", 1);
+  ros::Publisher edge_markers_pub =
+      n.advertise<visualization_msgs::Marker>("/loop_edges", 1);
+  tf::TransformBroadcaster tf_broadcaster;
 
   auto show_function =
       [&](const static_map::MapBuilder::PointCloudPtr& cloud) -> void {
     sensor_msgs::PointCloud2 map_pointcloud;
     pcl::toROSMsg(*cloud, map_pointcloud);
-    map_pointcloud.header.frame_id = "/map";
+    map_pointcloud.header.frame_id = kMapFrameId;
     map_pointcloud.header.stamp = ros::Time::now();
     map_publisher.publish(map_pointcloud);
   };
 
   auto show_submap_function =
-      [&](const static_map::MapBuilder::PointCloudPtr& cloud) -> void {
+      [&](const static_map::MapBuilder::PointCloudPtr& cloud,
+          const Eigen::Matrix4d& pose) -> void {
+    tf::Transform transform;
+    transform.setOrigin(tf::Vector3(pose(0, 3), pose(1, 3), pose(2, 3)));
+    Eigen::Quaterniond rotation(Eigen::Matrix3d(pose.block(0, 0, 3, 3)));
+    tf::Quaternion q;
+    q.setW(rotation.w());
+    q.setX(rotation.x());
+    q.setY(rotation.y());
+    q.setZ(rotation.z());
+    transform.setRotation(q);
+    tf_broadcaster.sendTransform(tf::StampedTransform(
+        transform, ros::Time::now(), kMapFrameId, tracking_frame));
+
     sensor_msgs::PointCloud2 submap_pointcloud;
     pcl::toROSMsg(*cloud, submap_pointcloud);
-    submap_pointcloud.header.frame_id = "/map";
+    submap_pointcloud.header.frame_id = tracking_frame;
     submap_pointcloud.header.stamp = ros::Time::now();
     submap_publisher.publish(submap_pointcloud);
   };
 
   const auto publish_path = [&](const std::vector<Eigen::Matrix4d>& poses) {
     nav_msgs::Path path;
-    path.header.frame_id = "/map";
+    path.header.frame_id = kMapFrameId;
 
     path.poses.reserve(poses.size());
     for (const Eigen::Matrix4d& pose : poses) {
       geometry_msgs::PoseStamped pose_ros;
-      pose_ros.header.frame_id = "/map";
+      pose_ros.header.frame_id = kMapFrameId;
       Eigen::Quaterniond q(Eigen::Matrix3d(pose.block(0, 0, 3, 3)));
       pose_ros.pose.orientation.w = q.w();
       pose_ros.pose.orientation.x = q.x();
@@ -239,6 +264,53 @@ int main(int argc, char** argv) {
     }
     path_pub.publish(path);
   };
+
+  const auto publish_edges =
+      [&](const std::map<int64_t, static_map::back_end::ViewGraph::GraphItem>&
+              graph) {
+        visualization_msgs::Marker line_list;
+        line_list.header.frame_id = kMapFrameId;
+        line_list.id = 0;
+        line_list.type = visualization_msgs::Marker::LINE_LIST;
+        // LINE_STRIP/LINE_LIST markers use only the x component of scale, for
+        // the line width
+        line_list.scale.x = 0.1;
+        // Line list is red
+        line_list.color.b = 1.0;
+        line_list.color.a = 1.0;
+        // Create the vertices for the points and lines
+        for (const auto& index_to_connected_item : graph) {
+          if (index_to_connected_item.second.connections.size() <= 1) {
+            continue;
+          }
+          const Eigen::Vector3d self_translation =
+              index_to_connected_item.second.self_pose.block(0, 3, 3, 1);
+
+          for (const auto& connection :
+               index_to_connected_item.second.connections) {
+            if (connection.first - index_to_connected_item.first == 1) {
+              continue;
+            }
+            geometry_msgs::Point p_start;
+            p_start.x = self_translation[0];
+            p_start.y = self_translation[1];
+            p_start.z = self_translation[2];
+
+            line_list.points.push_back(p_start);
+
+            geometry_msgs::Point p_end;
+            const Eigen::Vector3d connected_translation =
+                graph.at(connection.first).self_pose.block(0, 3, 3, 1);
+            p_end.x = connected_translation[0];
+            p_end.y = connected_translation[1];
+            p_end.z = connected_translation[2];
+
+            line_list.points.push_back(p_end);
+          }
+        }
+
+        edge_markers_pub.publish(line_list);
+      };
 
   map_builder = std::make_shared<MapBuilder>();
 
@@ -304,6 +376,9 @@ int main(int argc, char** argv) {
     if (std::strstr(pub_topics.c_str(), "[path]")) {
       map_builder->SetShowPathFunction(publish_path);
     }
+    if (std::strstr(pub_topics.c_str(), "[edge]")) {
+      map_builder->SetShowEdgeFunction(publish_edges);
+    }
   }
 
   REGISTER_FUNC;
@@ -342,7 +417,7 @@ int main(int argc, char** argv) {
       // read bag in twice time of the bag speed
       // like : rosbag play ***.bag -r 2
       if (message.getTime() > last_message_time) {
-        usleep((message.getTime() - last_message_time).toSec() * 0.5 * 1000000);
+        usleep((message.getTime() - last_message_time).toSec() * 0.1 * 1000000);
       }
       last_message_time = message.getTime();
 
@@ -363,7 +438,7 @@ int main(int argc, char** argv) {
         // LOG(ERROR) << point_cloud->size();
         point_cloud->header.frame_id = cloud_frame_id;
         point_cloud->header.stamp =
-            static_map::SimpleTime::get_current_time().toNSec() / 1000ull;
+            static_map::SimpleTime::GetCurrentTime().ToNanoSec() / 1000ull;
         map_builder->InsertPointcloudMsg(point_cloud);
 
         usleep(100000);

@@ -20,33 +20,27 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#ifndef BUILDER_SENSORS_H_
-#define BUILDER_SENSORS_H_
+#ifndef BUILDER_DATA_DATA_TYPES_H_
+#define BUILDER_DATA_DATA_TYPES_H_
 // third party
 #include <Eigen/Eigen>
 // stl
 #include <cmath>
 #include <memory>
 #include <string>
+#include <vector>
 // local
+#include "builder/data/cloud_types.h"
 #include "common/simple_time.h"
+#include "glog/logging.h"
+#include "pcl/common/transforms.h"
+#include "pcl/point_cloud.h"
+#include "pcl/point_types.h"
 
 namespace static_map {
-namespace sensors {
+namespace data {
 
 struct Header {
- public:
-  Header() = default;
-  ~Header() = default;
-
-  Header &operator=(const Header &header) {
-    seq = header.seq;
-    stamp = header.stamp;
-    frame_id = header.frame_id;
-
-    return *this;
-  }
-
   uint32_t seq;
   SimpleTime stamp;
   std::string frame_id;
@@ -54,10 +48,6 @@ struct Header {
 
 enum ImuType { kNormalImu, kInsCombinedImu, kImuTypeCount };
 struct ImuMsg {
- public:
-  ImuMsg() = default;
-  ~ImuMsg() = default;
-
   typedef double Convariance[9];
 
   Header header;
@@ -149,18 +139,9 @@ struct OdomMsg {
     double covariance[36];
   } twist;
 
-  Eigen::Matrix4d PoseInMatrix() const {
-    Eigen::Matrix4d pose_in_matrix = Eigen::Matrix4d::Identity();
-    pose_in_matrix.block(0, 3, 3, 1) = pose.pose.position;
-    pose_in_matrix.block(0, 0, 3, 3) = pose.pose.orientation.toRotationMatrix();
-    return pose_in_matrix;
-  }
+  Eigen::Matrix4d PoseInMatrix() const;
 
-  void SetPose(const Eigen::Matrix4d &pose_mat) {
-    pose.pose.position = pose_mat.block(0, 3, 3, 1);
-    pose.pose.orientation =
-        Eigen::Quaterniond(Eigen::Matrix3d(pose_mat.block(0, 0, 3, 3)));
-  }
+  void SetPose(const Eigen::Matrix4d &pose_mat);
 
   Eigen::Quaterniond RotationInMatrix() const { return pose.pose.orientation; }
 };
@@ -179,14 +160,14 @@ struct GpsEnuMsg {
 };
 
 struct TimedPose {
-  TimedPose() {}
+  TimedPose() = default;
   TimedPose(const SimpleTime &t, const Eigen::Matrix4d &p) : time(t), pose(p) {}
   SimpleTime time;
   Eigen::Matrix4d pose;
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
-}  // namespace sensors
+}  // namespace data
 }  // namespace static_map
 
-#endif  // BUILDER_SENSORS_H_
+#endif  // BUILDER_DATA_DATA_TYPES_H_

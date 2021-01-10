@@ -38,8 +38,6 @@
 namespace static_map {
 namespace back_end {
 
-constexpr double kInitGpsOptimizeRotationThreshold = 1.6;  // rad
-
 using gtsam::between;
 using gtsam::compose;
 using gtsam::Point3;
@@ -61,13 +59,13 @@ namespace NM = gtsam::noiseModel;
 #define VELOCITY_KEY(index) (gtsam::Symbol(VELOCITY_SYMBOL, (index)))
 #define ODOM_CALIB_KEY (gtsam::Symbol(CALIB_SYMBOL, 0))
 #define IMU_CALIB_KEY (gtsam::Symbol(CALIB_SYMBOL, 1))
+#define GPS_CALIB_KEY (gtsam::Symbol(CALIB_SYMBOL, 2))
 #define GPS_COORD_KEY (gtsam::Symbol(GPS_COORD_SYMBOL, 0))
 
-template <typename PointT>
-IsamOptimizer<PointT>::IsamOptimizer(const IsamOptimizerOptions &options,
-                                     const LoopDetectorSettings &l_d_setting)
+IsamOptimizer::IsamOptimizer(const IsamOptimizerOptions &options,
+                             const LoopDetectorSettings &l_d_setting)
     : isam_factor_graph_(new gtsam::NonlinearFactorGraph),
-      loop_detector_(new LoopDetector<PointT>(l_d_setting)),
+      loop_detector_(new LoopDetector(l_d_setting)),
       options_(options) {
   gtsam::ISAM2Params parameters;
   parameters.relinearizeThreshold = 0.01;
@@ -83,16 +81,19 @@ IsamOptimizer<PointT>::IsamOptimizer(const IsamOptimizerOptions &options,
       (gtsam::Vector(6) << 0.1, 0.1, 0.1, 0.15, 0.15, 0.15).finished());
   loop_closure_noise_model_ = NM::Diagonal::Sigmas(
       (gtsam::Vector(6) << 0.1, 0.1, 0.1, 0.15, 0.15, 0.15).finished());
-  odom_tf_noise_model_ = NM::Diagonal::Sigmas(
-      (gtsam::Vector(6) << 0.5, 0.5, 1.5, 0.1, 0.1, 0.1).finished());
+  if (options_.enable_extrinsic_calib) {
+    odom_tf_noise_model_ = NM::Diagonal::Sigmas(
+        (gtsam::Vector(6) << 0.5, 0.5, 1.5, 0.1, 0.1, 0.1).finished());
+  } else {
+    odom_tf_noise_model_ = NM::Isotropic::Sigma(6, 1.e-6);
+  }
   odom_noise_model_ = NM::Robust::Create(
       NM::mEstimator::Huber::Create(1),
       NM::Diagonal::Sigmas(
           (gtsam::Vector(6) << 0.2, 0.2, 0.2, 1.5, 1.5, 2).finished()));
 }
 
-template <typename PointT>
-void IsamOptimizer<PointT>::IsamUpdate(const int update_time) {
+void IsamOptimizer::IsamUpdate(const int update_time) {
   CHECK_GE(update_time, 1);
   isam_->update(*isam_factor_graph_, initial_estimate_);
   for (int i = 0; i < update_time; ++i) {
@@ -102,8 +103,7 @@ void IsamOptimizer<PointT>::IsamUpdate(const int update_time) {
   initial_estimate_.clear();
 }
 
-template <typename PointT>
-gtsam::Values IsamOptimizer<PointT>::UpdateAllPose() {
+gtsam::Values IsamOptimizer::UpdateAllPose() {
   gtsam::Values estimate_poses = isam_->calculateBestEstimate();
   const auto &frames = loop_detector_->GetFrames();
   const int frames_size = frames.size();
@@ -114,11 +114,17 @@ gtsam::Values IsamOptimizer<PointT>::UpdateAllPose() {
     view_graph_.AddVertex(i, pose);
   }
 
+  // if (estimate_poses.exists<gtsam::Point3>(GPS_CALIB_KEY)) {
+  //   const gtsam::Point3 gps_tf_error =
+  //       estimate_poses.at<gtsam::Point3>(GPS_CALIB_KEY);
+  //   PRINT_INFO_FMT("gps tf error: %lf, %lf, %lf", gps_tf_error.x(),
+  //                  gps_tf_error.y(), gps_tf_error.z());
+  // }
+
   return estimate_poses;
 }
 
-template <typename PointT>
-void IsamOptimizer<PointT>::AddLoopCloseEdge(
+void IsamOptimizer::AddLoopCloseEdge(
     const int target_index, const int source_index,
     const Eigen::Matrix4d &transform_tgt_to_src,
     const NM::Base::shared_ptr &loop_close_noise) {
@@ -131,11 +137,9 @@ void IsamOptimizer<PointT>::AddLoopCloseEdge(
   view_graph_.AddEdge(target_index, source_index, transform_tgt_to_src);
 }
 
-template <typename PointT>
-void IsamOptimizer<PointT>::AddVertex(
-    const int &index, const Eigen::Matrix4d &pose,
-    const Eigen::Matrix4d &transform_from_last_pose,
-    const NM::Base::shared_ptr &odom_noise) {
+void IsamOptimizer::AddVertex(const int &index, const Eigen::Matrix4d &pose,
+                              const Eigen::Matrix4d &transform_from_last_pose,
+                              const NM::Base::shared_ptr &odom_noise) {
   auto &frames = loop_detector_->GetFrames();
   gtsam::Pose3 pose_gtsam = gtsam::Pose3(pose);
   gtsam::Pose3 transform_gtsam = gtsam::Pose3(transform_from_last_pose);
@@ -168,8 +172,7 @@ void IsamOptimizer<PointT>::AddVertex(
   IsamUpdate();
 }
 
-template <typename PointT>
-double IsamOptimizer<PointT>::AnalyseAllFramePoseForMaxRotation() {
+double IsamOptimizer::AnalyseAllFramePoseForMaxRotation() {
   const auto &frames = loop_detector_->GetFrames();
 
   if (frames.size() <= 1) {
@@ -190,16 +193,15 @@ double IsamOptimizer<PointT>::AnalyseAllFramePoseForMaxRotation() {
   return delta_rotations.back();
 }
 
-template <typename PointT>
-void IsamOptimizer<PointT>::AddFrame(
-    const std::shared_ptr<Submap<PointT>> &frame, const double match_score) {
+void IsamOptimizer::AddFrame(const std::shared_ptr<Submap> &frame,
+                             const double match_score) {
   CHECK(frame);
   auto result = loop_detector_->AddFrame(frame, true);
   const auto &frames = loop_detector_->GetFrames();
   int frame_index = static_cast<int>(frames.size()) - 1;
   CHECK_EQ(frame_index, result.current_frame_index);
-  PRINT_DEBUG_FMT("optimizer inserting a new frame, match score: %lf",
-                  match_score);
+  PRINT_DEBUG_FMT("optimizer inserting frame: %d, match score: %lf",
+                  frame_index, match_score);
 
   AddVertex(result.current_frame_index, frame->GlobalPose(),
             frame->TransformFromLast(), frame_match_noise_model_);
@@ -223,10 +225,11 @@ void IsamOptimizer<PointT>::AddFrame(
 
   // try to close loop and add constraint
   if (result.close_succeed) {
-    const int edge_size = result.close_pair.size();
-    for (int i = 0; i < edge_size; ++i) {
-      AddLoopCloseEdge(result.close_pair[i].first, result.close_pair[i].second,
-                       result.transform[i], loop_closure_noise_model_);
+    const int edge_size = result.edges.size();
+    for (const auto &edge : result.edges) {
+      AddLoopCloseEdge(edge.close_pair_index.first,
+                       edge.close_pair_index.second, edge.transform,
+                       loop_closure_noise_model_);
       IsamUpdate();
     }
     PRINT_INFO_FMT(BOLD "Add %d loop closure edges." NONE_FORMAT, edge_size);
@@ -234,24 +237,35 @@ void IsamOptimizer<PointT>::AddFrame(
 
   auto add_enu_factor = [&](const int index, const EnuPosition &enu) {
     // expression :
-    // map_origin_in_gps * map_pose * tracking_to_gps = gps pose
-    // but gps has no rotation since it only provides longtitude, latitude
-    // so we use only translation in the tracking_to_gps
+    //   map_origin_in_gps * map_pose * (tracking_to_gps + tf_error) =
+    //   gps_position.
+    // notice that gps has no rotation since it only provides longtitude,
+    // latitude so we use only translation in the tracking_to_gps
     auto map_origin_in_gps = Pose3_(GPS_COORD_KEY);
+    auto tf_error = gtsam::Point3_(GPS_CALIB_KEY);
     auto pose = Pose3_(POSE_KEY(index));
     const gtsam::Point3 tracking_gps_translation(
         tf_tracking_gps_.block(0, 3, 3, 1));
-    isam_factor_graph_->addExpressionFactor(
-        gps_noise_model_, gtsam::Point3(enu),
-        gtsam::transform_from(gtsam::compose(map_origin_in_gps, pose),
-                              gtsam::Point3_(tracking_gps_translation)));
+    if (options_.enable_extrinsic_calib) {
+      isam_factor_graph_->addExpressionFactor(
+          gps_noise_model_, gtsam::Point3(enu),
+          gtsam::transform_from(
+              gtsam::compose(map_origin_in_gps, pose),
+              gtsam::compose(gtsam::Point3_(tracking_gps_translation),
+                             tf_error)));
+    } else {
+      isam_factor_graph_->addExpressionFactor(
+          gps_noise_model_, gtsam::Point3(enu),
+          gtsam::transform_from(gtsam::compose(map_origin_in_gps, pose),
+                                gtsam::Point3_(tracking_gps_translation)));
+    }
   };
 
   if (options_.use_gps && frame->HasGps()) {
     if (!calculated_first_gps_coord_) {
-      if (cached_enu_.size() < options_.gps_skip_num ||
+      if (cached_enu_.size() < options_.gps_factor_init_num ||
           AnalyseAllFramePoseForMaxRotation() <
-              kInitGpsOptimizeRotationThreshold) {
+              options_.gps_factor_init_angle_rad) {
         // cache enu data
         cached_enu_[result.current_frame_index] = frame->GetRelatedGpsInENU();
       } else {
@@ -264,8 +278,12 @@ void IsamOptimizer<PointT>::AddFrame(
         calculated_first_gps_coord_ = true;
       }
     } else {
-      add_enu_factor(result.current_frame_index, frame->GetRelatedGpsInENU());
-      IsamUpdate();
+      if (options_.gps_factor_sample_step <= 1 ||
+          frame_index % options_.gps_factor_sample_step == 0) {
+        // PRINT_INFO_FMT("Insert enu factor for submap %d", frame_index);
+        add_enu_factor(frame_index, frame->GetRelatedGpsInENU());
+        IsamUpdate();
+      }
     }
   }
 
@@ -274,8 +292,7 @@ void IsamOptimizer<PointT>::AddFrame(
   UpdateAllPose();
 }
 
-template <typename PointT>
-void IsamOptimizer<PointT>::SolveGpsCorrdAlone() {
+void IsamOptimizer::SolveGpsCorrdAlone() {
   PRINT_INFO("Solve the gps coord alone with exsiting pose and gps(enu).");
   // LOG(FATAL) << "This function is not ready.";
 
@@ -301,6 +318,8 @@ void IsamOptimizer<PointT>::SolveGpsCorrdAlone() {
     initials.insert(pose_key, pose);
     graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(pose_key, pose,
                                                            pose_noise);
+    // At this time, we ignore the tf error. TODO(edward), Maybe add tf error
+    // later.
     graph.addExpressionFactor(
         gps_noise_model_, gtsam::Point3(index_enu.second),
         gtsam::transform_from(gtsam::compose(Pose3_(gps_key), Pose3_(pose_key)),
@@ -320,12 +339,16 @@ void IsamOptimizer<PointT>::SolveGpsCorrdAlone() {
   initial_estimate_.insert(GPS_COORD_KEY, gps_coord_transform_);
   isam_factor_graph_->addExpressionFactor(
       NM::Diagonal::Sigmas(
-          (gtsam::Vector(6) << 0.2, 0.2, 0.2, 1., 1., 1.).finished()),
+          (gtsam::Vector(6) << 0.1, 0.1, 0.2, 1., 1., 1.).finished()),
       gps_coord_transform_, Pose3_(GPS_COORD_KEY));
+
+  initial_estimate_.insert(GPS_CALIB_KEY, gtsam::Point3(0, 0, 0));
+  isam_factor_graph_->addExpressionFactor(
+      NM::Diagonal::Sigmas((gtsam::Vector(3) << 1, 1, 0.2).finished()),
+      gtsam::Point3(0, 0, 0), gtsam::Point3_(GPS_CALIB_KEY));
 }
 
-template <typename PointT>
-void IsamOptimizer<PointT>::RunFinalOptimazation() {
+void IsamOptimizer::RunFinalOptimazation() {
   IsamUpdate();
   gtsam::Values estimate_poses = UpdateAllPose();
 
@@ -344,8 +367,7 @@ void IsamOptimizer<PointT>::RunFinalOptimazation() {
   }
 }
 
-template <typename PointT>
-Eigen::Matrix4d IsamOptimizer<PointT>::GetGpsCoordTransform() {
+Eigen::Matrix4d IsamOptimizer::GetGpsCoordTransform() {
   if (options_.use_gps) {
     gtsam::Values estimate_poses = isam_->calculateEstimate();
     if (estimate_poses.exists<gtsam::Pose3>(GPS_COORD_KEY)) {
@@ -360,23 +382,22 @@ Eigen::Matrix4d IsamOptimizer<PointT>::GetGpsCoordTransform() {
   return Eigen::Matrix4d::Identity();
 }
 
-template <typename PointT>
-void IsamOptimizer<PointT>::SetTransformOdomToLidar(const Eigen::Matrix4d &t) {
+std::map<int64_t, ViewGraph::GraphItem> IsamOptimizer::GetWholeGraph() const {
+  return view_graph_.GetWholeGraph();
+}
+
+void IsamOptimizer::SetTransformOdomToLidar(const Eigen::Matrix4d &t) {
   tf_odom_lidar_ = t;
   loop_detector_->SetTransformOdomToLidar(t);
 }
 
-template <typename PointT>
-void IsamOptimizer<PointT>::SetTrackingToGps(const Eigen::Matrix4d &t) {
+void IsamOptimizer::SetTrackingToGps(const Eigen::Matrix4d &t) {
   tf_tracking_gps_ = t;
 }
 
-template <typename PointT>
-Eigen::Matrix4d IsamOptimizer<PointT>::GetTransformOdomToLidar() {
+Eigen::Matrix4d IsamOptimizer::GetTransformOdomToLidar() {
   return tf_odom_lidar_;
 }
-
-template class IsamOptimizer<pcl::PointXYZI>;
 
 }  // namespace back_end
 }  // namespace static_map

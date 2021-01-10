@@ -20,31 +20,45 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include "back_end/loop_detector.h"
+
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <string>
 
-#include "back_end/loop_detector.h"
 #include "builder/submap.h"
+#include "common/math.h"
 #include "common/simple_thread_pool.h"
+#include "registrators/icp_fast.h"
 #include "registrators/icp_pointmatcher.h"
 #include "tbb/task_group.h"
 
 namespace static_map {
 namespace back_end {
+namespace {
+const std::map<LoopStatus, std::string> kLoopStatusToStr = {
+    {LoopStatus::kNoLoop, "No Loop"},
+    {LoopStatus::kTryingToCloseLoop, "Trying To Close Loop"},
+    {LoopStatus::kEnteringLoop, "Entering Loop"},
+    {LoopStatus::kContinousLoop, "Continous Loop"},
+    {LoopStatus::kLeavingLoop, "Leaving Loop"}};
+}
 
-template <typename PointT>
-typename LoopDetector<PointT>::DetectResult LoopDetector<PointT>::AddFrame(
-    const std::shared_ptr<Submap<PointT>>& frame, bool do_loop_detect) {
+DetectResult LoopDetector::AddFrame(const std::shared_ptr<Submap>& frame,
+                                    bool do_loop_detect) {
   all_frames_.push_back(frame);
-  const Eigen::Vector3d translation = frame->GlobalTranslation();
-  all_frames_translation_.push_back(translation);
+
+  // Update all positions since they could have been changed.
+  all_frames_translation_.emplace_back();
+  CHECK_EQ(all_frames_.size(), all_frames_translation_.size());
+  for (size_t i = 0; i < all_frames_.size(); ++i) {
+    all_frames_translation_[i] = all_frames_[i]->GlobalTranslation();
+  }
 
   int32_t current_index = all_frames_.size() - 1;
-  const char* mode_name[kLoopStatusCount] = {"No Loop", "Trying To Close Loop",
-                                             "Entering Loop", "Continous Loop",
-                                             "Leaving Loop"};
 
-  typename LoopDetector<PointT>::DetectResult result;
+  DetectResult result;
   result.status = current_status_;
   result.current_frame_index = current_index;
   if (!do_loop_detect ||
@@ -97,8 +111,8 @@ typename LoopDetector<PointT>::DetectResult LoopDetector<PointT>::AddFrame(
       for (auto& i : indices_in_distance) {
         CHECK_NE(i, current_index);
         auto& target_frame = all_frames_.at(i);
-        if (descriptor::matchTwoM2dpDescriptors<PointT>(
-                frame->GetDescriptor(), target_frame->GetDescriptor()) >
+        if (descriptor::matchTwoM2dpDescriptors(frame->GetDescriptor(),
+                                                target_frame->GetDescriptor()) >
             settings_.m2dp_match_score) {
           indices_well_matched.push_back(i);
         }
@@ -139,51 +153,51 @@ typename LoopDetector<PointT>::DetectResult LoopDetector<PointT>::AddFrame(
   }
 
   switch (current_status_) {
-    case kNoLoop:
+    case LoopStatus::kNoLoop:
       accumulate_loop_detected_count_ = 0;
       if (loop_detection_ == 1) {
-        current_status_ = kTryingToCloseLoop;
+        current_status_ = LoopStatus::kTryingToCloseLoop;
         accumulate_loop_detected_count_++;
         if (accumulate_loop_detected_count_ >=
             settings_.trying_detect_loop_count) {
-          current_status_ = kEnteringLoop;
+          current_status_ = LoopStatus::kEnteringLoop;
         }
       }
       break;
 
-    case kTryingToCloseLoop:
+    case LoopStatus::kTryingToCloseLoop:
       if (loop_detection_ == 1) {
         accumulate_loop_detected_count_++;
         if (accumulate_loop_detected_count_ >=
             settings_.trying_detect_loop_count) {
-          current_status_ = kEnteringLoop;
+          current_status_ = LoopStatus::kEnteringLoop;
         }
       } else if (loop_detection_ == 0) {
-        current_status_ = kNoLoop;
+        current_status_ = LoopStatus::kNoLoop;
       }
       break;
 
-    case kEnteringLoop:
+    case LoopStatus::kEnteringLoop:
       if (loop_detection_ == 0) {
-        current_status_ = kTryingToCloseLoop;
+        current_status_ = LoopStatus::kTryingToCloseLoop;
       } else if (loop_detection_ == 1) {
-        current_status_ = kContinousLoop;
+        current_status_ = LoopStatus::kContinousLoop;
       }
       break;
 
-    case kContinousLoop:
+    case LoopStatus::kContinousLoop:
       if (loop_detection_ == 0) {
-        current_status_ = kLeavingLoop;
+        current_status_ = LoopStatus::kLeavingLoop;
         accumulate_loop_detected_count_ = 0;
         current_min_distance_ = -1;
       }
       break;
 
-    case kLeavingLoop:
+    case LoopStatus::kLeavingLoop:
       if (loop_detection_ == 0) {
-        current_status_ = kNoLoop;
+        current_status_ = LoopStatus::kNoLoop;
       } else if (loop_detection_ == 1) {
-        current_status_ = kTryingToCloseLoop;
+        current_status_ = LoopStatus::kTryingToCloseLoop;
       }
       break;
 
@@ -192,44 +206,81 @@ typename LoopDetector<PointT>::DetectResult LoopDetector<PointT>::AddFrame(
   }
 
   if (loop_detection_ != 0) {
-    PRINT_INFO_FMT("Current Mode : %s", mode_name[(int)current_status_]);
+    PRINT_INFO_FMT("Current Mode : %s",
+                   kLoopStatusToStr.at(current_status_).c_str());
   }
 
-  if (current_status_ == kContinousLoop) {
+  if (current_status_ == LoopStatus::kContinousLoop) {
     CHECK(!maybe_close_pair.empty());
 
     auto pair_close_loop = [&](const std::pair<int, int>& p) {
-      double constraint_score = 0.;
-      Eigen::Matrix4d transform;
-      if (CloseLoop(p.first, p.second, &transform, &constraint_score)) {
-        result.close_pair.push_back(p);
-        result.transform.push_back(transform);
-        result.constraint_score.push_back(constraint_score);
+      DetectResult::LoopEdge loop_edge;
+      loop_edge.close_pair_index = p;
+      if (CloseLoop(&loop_edge)) {
+        result.edges.push_back(loop_edge);
       }
     };
-    // using threadpool
-    // common::ThreadPool pool(pair_size);
-    // const int pair_size = maybe_close_pair.size();
-    // for (auto& pair : maybe_close_pair) {
-    //   pool.enqueue(pair_close_loop, pair);
-    // }
+
     tbb::task_group tasks;
     for (auto& pair : maybe_close_pair) {
       tasks.run([&] { pair_close_loop(pair); });
     }
     tasks.wait();
 
-    if (!result.close_pair.empty()) {
-      result.close_succeed = true;
+    if (!result.edges.empty()) {
+      result.close_succeed = CheckResult(result);
+      if (settings_.output_matched_cloud && !result.close_succeed) {
+        // For debug.
+        for (const auto& edge : result.edges) {
+          const int source_id = edge.close_pair_index.second;
+          const int target_id = edge.close_pair_index.first;
+          {
+            // TODO(edward) Add api of innercloud to write pcd directly or add
+            // tool to view .bin just like pcl_viewer.
+            // Output combined cloud using init pose.
+            data::InnerCloudType::Ptr none_matched_cloud(
+                new data::InnerCloudType);
+            all_frames_.at(source_id)
+                ->Cloud()
+                ->GetInnerCloud()
+                ->ApplyTransformToOutput(edge.init_guess,
+                                         none_matched_cloud.get());
+            *none_matched_cloud +=
+                *all_frames_.at(target_id)->Cloud()->GetInnerCloud();
+
+            pcl::PointCloud<pcl::PointXYZI> output_cloud;
+            data::ToPclPointCloud(*none_matched_cloud, &output_cloud);
+            pcl::io::savePCDFile("pcd/matched_" + std::to_string(target_id) +
+                                     "_" + std::to_string(source_id) +
+                                     "_init.pcd",
+                                 output_cloud);
+          }
+          {
+            // Output combined cloud using init pose.
+            data::InnerCloudType::Ptr matched_cloud(new data::InnerCloudType);
+            all_frames_.at(source_id)
+                ->Cloud()
+                ->GetInnerCloud()
+                ->ApplyTransformToOutput(edge.transform, matched_cloud.get());
+            *matched_cloud +=
+                *all_frames_.at(target_id)->Cloud()->GetInnerCloud();
+
+            pcl::PointCloud<pcl::PointXYZI> output_cloud;
+            data::ToPclPointCloud(*matched_cloud, &output_cloud);
+            pcl::io::savePCDFile("pcd/matched_" + std::to_string(target_id) +
+                                     "_" + std::to_string(source_id) +
+                                     "_error.pcd",
+                                 output_cloud);
+          }
+        }
+      }
     }
   }
 
   return result;
 }
 
-template <typename PointT>
-void LoopDetector<PointT>::SetSearchWindow(const int start_index,
-                                           const int end_index) {
+void LoopDetector::SetSearchWindow(const int start_index, const int end_index) {
   CHECK_GE(start_index, 0);
   CHECK_GE(end_index, 0);
   CHECK_GE(end_index, start_index);
@@ -238,63 +289,77 @@ void LoopDetector<PointT>::SetSearchWindow(const int start_index,
   search_window_end_ = end_index;
 }
 
-template <typename PointT>
-bool LoopDetector<PointT>::CloseLoop(const int target_id, const int source_id,
-                                     Eigen::Matrix4d* const result,
-                                     double* score) {
-  // PRINT_INFO("Trying to close loop ...");
+bool LoopDetector::CloseLoop(DetectResult::LoopEdge* edge) const {
+  const int target_id = edge->close_pair_index.first;
+  const int source_id = edge->close_pair_index.second;
+
   CHECK(all_frames_.size() > target_id && all_frames_.size() > source_id);
   Eigen::Matrix4d init_guess = all_frames_[target_id]->GlobalPose().inverse() *
                                all_frames_[source_id]->GlobalPose();
   // @todo it is a trick, remove it
   init_guess(2, 3) = 0.f;
-  if (settings_.use_gps && all_frames_[target_id]->HasGps() &&
-      all_frames_[source_id]->HasGps()) {
-    // if use gps, update the translation part of guess
-    const EnuPosition delta_enu = all_frames_[source_id]->GetRelatedGpsInENU() -
-                                  all_frames_[target_id]->GetRelatedGpsInENU();
-    init_guess.block(0, 3, 3, 1) = delta_enu;
-  }
+  // TODO(edward) Fix this bug!! It is quite wrong to simply calculating like
+  // this.
+  // if (settings_.use_gps && all_frames_[target_id]->HasGps() &&
+  //     all_frames_[source_id]->HasGps()) {
+  //   // if use gps, update the translation part of guess
+  //   const EnuPosition delta_enu =
+  //   all_frames_[source_id]->GetRelatedGpsInENU() -
+  //                                 all_frames_[target_id]->GetRelatedGpsInENU();
+  //   init_guess.block(0, 3, 3, 1) = delta_enu;
+  // }
+  edge->init_guess = init_guess;
 
-  registrator::IcpUsingPointMatcher<PointT> scan_matcher;
+  // TODO(edward) Load the config for submap matching.
+  registrator::IcpUsingPointMatcher scan_matcher;
   scan_matcher.SetInputSource(all_frames_[source_id]->Cloud());
   scan_matcher.SetInputTarget(all_frames_[target_id]->Cloud());
-  scan_matcher.Align(init_guess, *result);
+  scan_matcher.Align(init_guess, edge->transform);
   const double match_score = scan_matcher.GetFitnessScore();
   if (match_score > settings_.accept_scan_match_score) {
     // match score = exp(-score)
     // so, score = -log_e(match_score)
-    *score = -std::log(match_score);
+    edge->score = -std::log(match_score);
     PRINT_INFO_FMT("++++ Got good match from source %d to target %d ++++",
                    source_id, target_id);
-
-    if (settings_.output_matched_cloud) {
-      // for debug
-      std::cout << "\nlast: " << source_id << std::endl
-                << all_frames_.at(source_id)->GlobalPose()
-                << "\nfirst: " << target_id << std::endl
-                << all_frames_.at(target_id)->GlobalPose() << std::endl;
-      PRINT_DEBUG_FMT("match score: %lf, score: %lf", match_score, *score);
-      typename pcl::PointCloud<PointT>::Ptr matched_cloud(
-          new typename pcl::PointCloud<PointT>);
-      pcl::transformPointCloud(*all_frames_.at(source_id)->Cloud(),
-                               *matched_cloud, *result);
-      *matched_cloud += *all_frames_.at(target_id)->Cloud();
-      pcl::io::savePCDFile("pcd/matched_" + std::to_string(target_id) + "_" +
-                               std::to_string(source_id) + ".pcd",
-                           *matched_cloud);
-    }
     return true;
   }
   return false;
 }
 
-template <typename PointT>
-void LoopDetector<PointT>::SetTransformOdomToLidar(const Eigen::Matrix4d& t) {
-  tf_odom_lidar_ = t;
+bool LoopDetector::CheckResult(const DetectResult& result) const {
+  // TODO(edward) CUrrently, this check is rather poor, so disable it.
+  // return true;
+
+  if (result.edges.size() <= 1) {
+    return false;
+  }
+
+  const auto& first_edge = result.edges[0];
+  const Eigen::Matrix4d first_source_pose =
+      all_frames_[first_edge.close_pair_index.first]->GlobalPose() *
+      first_edge.transform;
+  for (size_t i = 1; i < result.edges.size(); ++i) {
+    const auto& edge = result.edges[i];
+    const Eigen::Matrix4d source_edge =
+        all_frames_[edge.close_pair_index.first]->GlobalPose() * edge.transform;
+
+    const Eigen::Matrix4d diff = first_source_pose.inverse() * source_edge;
+    const double trans_diff = diff.block(0, 3, 3, 1).norm();
+    const double rotation_diff = common::RotationMatrixToEulerAngles(
+                                     Eigen::Matrix3d(diff.block(0, 0, 3, 3)))
+                                     .norm();
+    if (trans_diff > 0.25 || rotation_diff > 0.02) {
+      PRINT_DEBUG_FMT("Invalid result, %lf, %lf", trans_diff, rotation_diff);
+      return false;
+    }
+  }
+  return true;
 }
 
-template class LoopDetector<pcl::PointXYZI>;
+void LoopDetector::SetTransformOdomToLidar(const Eigen::Matrix4d& t) {
+  tf_odom_lidar_ = t;
+}
 
 }  // namespace back_end
 }  // namespace static_map

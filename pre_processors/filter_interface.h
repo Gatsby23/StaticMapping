@@ -25,79 +25,47 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "pre_processors/processor_interface.h"
 
-#include "common/pugixml.hpp"
+#include "pugixml/pugixml.hpp"
 
 namespace static_map {
 namespace pre_processers {
 namespace filter {
 
-template <typename PointT>
-class Interface : public ProcesserInterface<PointT> {
+class Interface : public ProcesserInterface {
  public:
-  using PointCloudPtr = typename ProcesserInterface<PointT>::PointCloudPtr;
+  Interface() : ProcesserInterface() {}
+  virtual ~Interface() {}
 
-  Interface() : ProcesserInterface<PointT>() {}
-  ~Interface() {}
-  Interface(const Interface&) = delete;
-  Interface& operator=(const Interface&) = delete;
+  PROHIBIT_COPY_AND_ASSIGN(Interface);
 
-  void InitFromXmlNode(const pugi::xml_node& node) {
-    CHECK_EQ(std::string(node.name()), "filter");
-    bool all_right = true;
-    for (auto param_node = node.child("param"); param_node;
-         param_node = param_node.next_sibling("param")) {
-      XmlInterface::ParamType param_type = XmlInterface::kParamTypeCount;
-      if (param_node.attribute("type")) {
-        param_type =
-            (XmlInterface::ParamType)param_node.attribute("type").as_int();
-      }
-      std::string param_name = param_node.attribute("name").as_string();
-      switch (param_type) {
-        case XmlInterface::kInt32Param:
-          all_right = this->SetValue(param_name, param_node.text().as_int());
-          break;
-        case XmlInterface::kFloatParam:
-          all_right = this->SetValue(param_name, param_node.text().as_float());
-          break;
-        default:
-          all_right = false;
-          break;
-      }
-      CHECK(all_right);
-    }
-  }
+  // @brief Use xml node to init inner config parameters.
+  bool InitFromXmlNode(const pugi::xml_node& node);
+  // @brief Use xml test to construct xml node, then init inner configs.
+  bool InitFromXmlText(const char* xml_text);
+  // @brief return whether all configs are valid.
+  virtual bool ConfigsValid() const { return true; }
+  // TODO(edward) should be a static function.
+  virtual std::shared_ptr<Interface> CreateNewInstance() = 0;
+  // @brief Filter and output the inlier points to cloud. should be implemented
+  // by child classes.
+  virtual void Filter(const data::InnerCloudType::Ptr& cloud) = 0;
+  // @brief return current filter's class name.
+  virtual std::string GetName() const;
 
-  void InitFromXmlText(const char* xml_text) {
-    pugi::xml_document doc;
-    if (doc.load_string(xml_text)) {
-      InitFromXmlNode(doc.first_child());
-    } else {
-      LOG(FATAL) << "invalid xml text.";
-    }
-  }
-
-  virtual std::shared_ptr<Interface<PointT>> CreateNewInstance() = 0;
-  virtual void Filter(const PointCloudPtr& cloud) = 0;
-
-  virtual void FilterPrepare(const PointCloudPtr& cloud) {
-    auto& input = Interface<PointT>::inner_cloud_;
-    cloud->clear();
-    cloud->header = input->header;
-    this->inliers_.clear();
-    this->outliers_.clear();
-  }
+ protected:
+  // @brief Will be called in the beginning of Filter(cloud) to ensure the cloud
+  // ready to go.
+  virtual void FilterPrepare(const data::InnerCloudType::Ptr& cloud);
 };
+
+extern const std::unordered_map<std::string, std::string> kFilterNameMap;
 
 }  // namespace filter
 }  // namespace pre_processers
 }  // namespace static_map
-
-#define USE_POINTCLOUD                                             \
-  using PointCloudType = pcl::PointCloud<PointT>;                  \
-  using PointCloudPtr = typename Interface<PointT>::PointCloudPtr; \
-  using PointCloudConstPtr = typename PointCloudType::ConstPtr;
 
 #endif  // PRE_PROCESSORS_FILTER_INTERFACE_H_

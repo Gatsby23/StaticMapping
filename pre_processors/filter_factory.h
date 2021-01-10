@@ -28,33 +28,23 @@
 #include <string>
 #include <vector>
 
-// filters
-#include "pre_processors/filter_axis_range.h"
-#include "pre_processors/filter_ground_removal.h"
-#include "pre_processors/filter_ground_removal2.h"
-#include "pre_processors/filter_random_sample.h"
-#include "pre_processors/filter_range.h"
-#include "pre_processors/filter_range_image.h"
-#include "pre_processors/filter_statistic_removal.h"
-#include "pre_processors/filter_voxel_grid.h"
+#include "pre_processors/filter_interface.h"
+#include "pugixml/pugixml.hpp"
 
 namespace static_map {
 namespace pre_processers {
 namespace filter {
 
-template <typename PointT>
-class Factory : public Interface<PointT> {
+class Factory : public Interface {
  public:
-  USE_POINTCLOUD;
-
-  Factory() : Interface<PointT>() { RegisterSupportedFilters(); }
+  Factory() : Interface() { RegisterSupportedFilters(); }
   ~Factory() = default;
 
   Factory(const Factory&) = delete;
   Factory& operator=(const Factory&) = delete;
 
-  std::shared_ptr<Interface<PointT>> CreateNewInstance() override {
-    return std::make_shared<Factory<PointT>>();
+  std::shared_ptr<Interface> CreateNewInstance() override {
+    return std::make_shared<Factory>();
   }
 
   /* example
@@ -65,81 +55,19 @@ class Factory : public Interface<PointT> {
     ...
   </filters>
   */
-  inline void InitFromXmlText(const char* text) {
-    InitFromXmlNode(pugi::xml_node(text));
-  }
+  void InitFromXmlText(const char* text);
 
-  void InitFromXmlNode(const pugi::xml_node& filters_node) {
-    for (auto filter_node = filters_node.child("filter"); filter_node;
-         filter_node = filter_node.next_sibling("filter")) {
-      const std::string filter_name = filter_node.attribute("name").as_string();
-      auto it = supported_filters_.find(filter_name);
-      if (it == supported_filters_.end()) {
-        XML_INFO << filter_name << " not supported yet." << std::endl;
-        continue;
-      }
+  void InitFromXmlNode(const pugi::xml_node& filters_node);
 
-      std::string debug_msg = "Creating filter: " + filter_name;
-      XML_INFO << debug_msg << std::endl;
-
-      auto filter = it->second->CreateNewInstance();
-      filter->InitFromXmlNode(filter_node);
-      filters_.push_back(filter);
-      filter->DisplayAllParams();
-    }
-  }
-
-  void Filter(const PointCloudPtr& cloud) override {
-    if (!cloud || !Interface<PointT>::inner_cloud_) {
-      LOG(WARNING) << "nullptr cloud, do nothing!" << std::endl;
-      return;
-    }
-
-    this->FilterPrepare(cloud);
-    if (filters_.empty()) {
-      *cloud = *this->inner_cloud_;
-      return;
-    }
-
-    // use all filters in order
-    PointCloudPtr middle_poindcloud1(new PointCloudType);
-    PointCloudPtr middle_poindcloud2(new PointCloudType);
-    *middle_poindcloud1 = *(this->inner_cloud_);
-    for (auto filter : filters_) {
-      filter->SetInputCloud(middle_poindcloud1);
-      filter->Filter(middle_poindcloud2);
-      // @todo copy but not directly =
-      *middle_poindcloud1 = *middle_poindcloud2;
-    }
-    *cloud = *middle_poindcloud2;
-  }
+  void Filter(const data::InnerCloudType::Ptr& cloud) override;
 
  protected:
   void RegisterSupportedFilters();
 
  private:
-  std::vector<std::shared_ptr<Interface<PointT>>> filters_;
-  std::map<std::string, std::shared_ptr<Interface<PointT>>> supported_filters_;
+  std::vector<std::shared_ptr<Interface>> filters_;
+  std::map<std::string, std::shared_ptr<Interface>> supported_filters_;
 };
-
-template <typename PointT>
-void Factory<PointT>::RegisterSupportedFilters() {
-  supported_filters_.emplace("RandomSampler",
-                             std::make_shared<RandomSampler<PointT>>());
-  supported_filters_.emplace("RangeImage",
-                             std::make_shared<RangeImage<PointT>>());
-  supported_filters_.emplace("GroundRemoval",
-                             std::make_shared<GroundRemoval<PointT>>());
-  supported_filters_.emplace("GroundRemoval2",
-                             std::make_shared<GroundRemoval2<PointT>>());
-  supported_filters_.emplace("Range", std::make_shared<Range<PointT>>());
-  supported_filters_.emplace("StatisticRemoval",
-                             std::make_shared<StatisticRemoval<PointT>>());
-  supported_filters_.emplace("VoxelGrid",
-                             std::make_shared<VoxelGrid<PointT>>());
-  supported_filters_.emplace("AxisRange",
-                             std::make_shared<AxisRange<PointT>>());
-}
 
 }  // namespace filter
 }  // namespace pre_processers

@@ -34,6 +34,7 @@
 #include <pcl/point_types.h>
 
 // stl
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -54,11 +55,11 @@
 namespace static_map {
 
 // forward declarations
-template <typename PointT>
+namespace data {
 class DataCollector;
+}
 
 namespace back_end {
-template <typename PointT>
 class IsamOptimizer;
 }
 
@@ -70,7 +71,7 @@ struct Options {
   // for imu
   struct {
     bool enabled = true;
-    sensors::ImuType type = sensors::ImuType::kNormalImu;
+    data::ImuType type = data::ImuType::kNormalImu;
     float frequency = 0.f;
     float gravity_constant = 9.8f;
   } imu_options;
@@ -98,6 +99,13 @@ struct MapBuilderOptions {
     std::string export_file_path = "./";
     std::string map_package_path = "./";
     OdomCalibrationMode odom_calib_mode = kOnlineCalib;
+
+    // TODO(edward) Trajectory output to map options.
+    bool separate_output = false;
+    bool output_mrvm = true;
+    bool output_direct_combined_map = true;
+
+    int separate_step = 200;
   } whole_options;
 
   front_end::Options front_end_options;
@@ -124,11 +132,16 @@ class MapBuilder {
   using PointCloudType = pcl::PointCloud<PointType>;
   using PointCloudPtr = PointCloudType::Ptr;
   using PointCloudConstPtr = PointCloudType::ConstPtr;
+  using InnerCloud = data::InnerPointCloudData;
+
   // call back function for ROS
   using ShowMapFunction = std::function<void(const PointCloudPtr&)>;
-  using ShowSubmapFunction = ShowMapFunction;
+  using ShowSubmapFunction =
+      std::function<void(const PointCloudPtr&, const Eigen::Matrix4d&)>;
   using ShowPathFunction =
       std::function<void(const std::vector<Eigen::Matrix4d>&)>;
+  using ShowEdgeFunction =
+      std::function<void(std::map<int64_t, back_end::ViewGraph::GraphItem>)>;
 
   using Ptr = std::shared_ptr<MapBuilder>;
   using ConstPtr = std::shared_ptr<const MapBuilder>;
@@ -141,17 +154,19 @@ class MapBuilder {
   /// @brief set a callback function when the map updated
   void SetShowMapFunction(const ShowMapFunction& func);
   /// @brief set a callback function when the map updated
-  void SetShowSubmapFunction(const ShowMapFunction& func);
+  void SetShowSubmapFunction(const ShowSubmapFunction& func);
   /// @brief set a callback function whem the pose updated
   void SetShowPathFunction(const ShowPathFunction& func);
+
+  void SetShowEdgeFunction(const ShowEdgeFunction& func);
   /// @brief get pointcloud and insert it into the inner container
   void InsertPointcloudMsg(const PointCloudPtr& point_cloud);
   /// @brief get imu msg from sensor and insert it into the inner container
-  void InsertImuMsg(const sensors::ImuMsg::Ptr& imu_msg);
+  void InsertImuMsg(const data::ImuMsg::Ptr& imu_msg);
   /// @brief get odom msg from sensor and insert it into the inner container
-  void InsertOdomMsg(const sensors::OdomMsg::Ptr& odom_msg);
+  void InsertOdomMsg(const data::OdomMsg::Ptr& odom_msg);
   /// @brief get gps msg from sensor and insert it into the inner container
-  void InsertGpsMsg(const sensors::NavSatFixMsg::Ptr& gps_msg);
+  void InsertGpsMsg(const data::NavSatFixMsg::Ptr& gps_msg);
   /// @brief if enable odom, will get the scan matching guess from odom
   void EnableUsingOdom(bool flag);
   /// @brief if enable gps, will calculate the transform from map to gps (enu)
@@ -183,7 +198,7 @@ class MapBuilder {
   /// @brief thread for scan to scan matching
   void ScanMatchProcessing();
   /// @brief it ia a new frame in current submap, with input cloud and pose
-  void InsertFrameForSubmap(const PointCloudPtr& cloud_ptr,
+  void InsertFrameForSubmap(InnerCloud::Ptr cloud_ptr,
                             const Eigen::Matrix4d& global_pose,
                             const double match_score);
   /// @brief thread for all operations on submaps
@@ -205,19 +220,19 @@ class MapBuilder {
   void GenerateMapPackage(const std::string& filename);
   /// @brief save the map into pieces if enabled
   void SaveMapPackage();
+  /// @brief save mrvm maps & combined map
+  void SaveMaps();
 
  private:
   common::Mutex mutex_;
   // ********************* data & options *********************
-  std::unique_ptr<DataCollector<PointType>> data_collector_;
+  std::unique_ptr<data::DataCollector> data_collector_;
   MapBuilderOptions options_;
   /// @notice if you want to access some xml_node later in the process,
   /// the doc (xml tree) must be still in the memory
   /// so, make it a member
   pugi::xml_document options_xml_doc_;
-  // odoms
-  std::vector<sensors::OdomMsg::Ptr> odom_msgs_;
-  sensors::OdomMsg init_odom_msg_;
+
   // we assume that there is only one lidar
   // even if we have several lidars, we still use the fused cloud only
   Eigen::Matrix4d transform_odom_lidar_;
@@ -234,28 +249,29 @@ class MapBuilder {
   std::atomic<bool> submap_processing_done_;
 
   // ********************* pre processors *********************
-  pre_processers::filter::Factory<PointType> filter_factory_;
+  pre_processers::filter::Factory filter_factory_;
   // frond end
   std::unique_ptr<PoseExtrapolator> extrapolator_ = nullptr;
-  std::shared_ptr<registrator::Interface<PointType>> scan_matcher_ = nullptr;
+  std::shared_ptr<registrator::Interface> scan_matcher_ = nullptr;
   std::unique_ptr<std::thread> scan_match_thread_;
-  std::vector<std::shared_ptr<Frame<PointType>>> frames_;
+  tbb::concurrent_vector<std::shared_ptr<Frame>> frames_;
   std::atomic<bool> scan_match_thread_running_;
   bool got_first_point_cloud_ = false;
 
   // ************************ back end ************************
   // submaps
   std::unique_ptr<std::thread> submap_thread_;
-  std::unique_ptr<back_end::IsamOptimizer<PointType>> isam_optimizer_;
+  std::unique_ptr<back_end::IsamOptimizer> isam_optimizer_;
 
   // show the result in RVIZ(ros) or other platform
   ShowMapFunction show_map_function_;
   ShowSubmapFunction show_submap_function_;
   ShowPathFunction show_path_function_;
+  ShowEdgeFunction show_edge_function_;
 
   // trajectories
-  std::vector<Trajectory<PointType>::Ptr> trajectories_;
-  Trajectory<PointType>::Ptr current_trajectory_;
+  std::vector<Trajectory::Ptr> trajectories_;
+  Trajectory::Ptr current_trajectory_;
 };
 
 }  // namespace static_map

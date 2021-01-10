@@ -150,6 +150,9 @@ option(ENABLE_TEST "" OFF)
 if(ENABLE_TEST)
   find_package(Boost REQUIRED COMPONENTS unit_test_framework)
   enable_testing()
+  add_custom_target(check COMMAND "ctest")
+
+  add_subdirectory(test)
 endif(ENABLE_TEST)
 
 #######################################################
@@ -159,16 +162,21 @@ add_subdirectory(common)
 add_subdirectory(descriptor)
 add_subdirectory(back_end)
 add_subdirectory(registrators)
+add_subdirectory(pre_processors)
 add_subdirectory(builder)
+add_subdirectory(third_parties)
 #######################################################
 ###  Target
 #######################################################
 # link_libraries(glog)
 list(APPEND static_mapping_libs ${PROJECT_NAME}_builder 
+  ${PROJECT_NAME}_builder_data
   ${PROJECT_NAME}_backend 
   ${PROJECT_NAME}_registrators
+  ${PROJECT_NAME}_pre_processors
   ${PROJECT_NAME}_descriptor
-  ${PROJECT_NAME}_common)
+  ${PROJECT_NAME}_common
+  pugixml)
 
 message(STATUS "Local libs: ${static_mapping_libs}")
 message(STATUS "Link libs: ${require_libs}")

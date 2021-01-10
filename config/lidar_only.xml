@@ -3,7 +3,9 @@
   <static_mapping>
     <whole_options 
       export_file_path="pcd/"
-      map_package_path="pkgs/test/" />
+      map_package_path="pkgs/test/"
+      output_mrvm="false"
+      output_direct_combined_map="true" />
     <map_package_options
       enable="false"
       border_offset="100"
@@ -87,12 +89,11 @@
       </submap_matcher_options>
       <submap_options 
         frame_count="2"
-        enable_inner_multiview_icp="false"
         enable_voxel_filter="false"
-        enable_random_sampleing="true"
+        enable_random_sampleing="false"
         enable_check="false"
         random_sampling_rate="0.5"
-        enable_disk_saving="false"
+        enable_disk_saving="true"
         disk_saving_delay="30"
         saving_name_prefix="s_" />
       <isam_optimizer_options 
@@ -105,7 +106,7 @@
         loop_ignore_threshold="20"
         trying_detect_loop_count="1"
         max_close_loop_distance="5"
-        max_close_loop_z_distance="1."
+        max_close_loop_z_distance="2."
         m2dp_match_score="0.975"
         accept_scan_match_score="0.8"
         nearest_history_pos_num="5" />

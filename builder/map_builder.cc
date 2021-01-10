@@ -32,18 +32,19 @@
 // local headers
 #include "back_end/isam_optimizer.h"
 #include "back_end/loop_detector.h"
-#include "builder/data_collector.h"
+#include "builder/data/data_collector.h"
 #include "builder/map_builder.h"
 #include "builder/memory_manager.h"
 #include "common/macro_defines.h"
 #include "common/performance/simple_prof.h"
-#include "common/pugixml.hpp"
+#include "common/simple_thread_pool.h"
 #include "descriptor/m2dp.h"
+#include "pre_processors/filter_random_sample.h"
+#include "pugixml/pugixml.hpp"
 
 namespace static_map {
 
 namespace {
-constexpr int kOdomMsgMaxSize = 100;
 constexpr int kSubmapResSize = 100;
 constexpr double kExpolatorMinDuration = 0.001;  // second
 constexpr double kLocalMapRange = 30.;           // m
@@ -60,7 +61,7 @@ MapBuilder::~MapBuilder() {}
 
 int MapBuilder::InitialiseInside() {
   PRINT_INFO("Init scan matchers.");
-  scan_matcher_ = registrator::CreateMatcher<PointType>(
+  scan_matcher_ = registrator::CreateMatcher(
       options_.front_end_options.scan_matcher_options, true);
   CHECK(scan_matcher_) << "scan match failed to init.";
 
@@ -69,21 +70,21 @@ int MapBuilder::InitialiseInside() {
     CHECK_GT(options_.front_end_options.imu_options.frequency, 1.e-6);
   } else {
     extrapolator_ = PoseExtrapolator::InitialSimpleCTRV(
-        SimpleTime::from_sec(kExpolatorMinDuration));
+        SimpleTime::FromSec(kExpolatorMinDuration));
   }
 
   PRINT_INFO("Init isam optimizer.");
-  isam_optimizer_.reset(new back_end::IsamOptimizer<PointType>(
+  isam_optimizer_.reset(new back_end::IsamOptimizer(
       options_.back_end_options.isam_optimizer_options,
       options_.back_end_options.loop_detector_setting));
 
   isam_optimizer_->SetTransformOdomToLidar(transform_odom_lidar_);
   isam_optimizer_->SetTrackingToGps(tracking_to_gps_);
 
-  DataCollectorOptions data_collector_options;
+  data::DataCollectorOptions data_collector_options;
   data_collector_options.accumulate_cloud_num =
       options_.front_end_options.accumulate_cloud_num;
-  data_collector_ = std::make_unique<DataCollector<PointType>>(
+  data_collector_ = std::make_unique<data::DataCollector>(
       data_collector_options, &filter_factory_);
 
 #ifdef _USE_OPENVDB_
@@ -102,7 +103,7 @@ int MapBuilder::InitialiseInside() {
   scan_match_thread_ = std::make_unique<std::thread>(
       std::bind(&MapBuilder::ScanMatchProcessing, this));
   while (!scan_match_thread_running_.load()) {
-    SimpleTime::from_sec(0.01).sleep();
+    SimpleTime::FromSec(0.01).Sleep();
   }
   submap_thread_ = std::make_unique<std::thread>(
       std::bind(&MapBuilder::SubmapProcessing, this));
@@ -164,10 +165,10 @@ void MapBuilder::InsertPointcloudMsg(const PointCloudPtr& point_cloud) {
   // LOG(INFO) << point_cloud->header.stamp;
   // transform to tracking frame
   pcl::transformPointCloud(*point_cloud, *point_cloud, tracking_to_lidar_);
-  data_collector_->AddSensorData(point_cloud);
+  data_collector_->AddSensorData<PointType>(point_cloud);
 }
 
-void MapBuilder::InsertImuMsg(const sensors::ImuMsg::Ptr& imu_msg) {
+void MapBuilder::InsertImuMsg(const data::ImuMsg::Ptr& imu_msg) {
   if (!use_imu_ || end_all_thread_.load()) {
     return;
   }
@@ -182,14 +183,14 @@ void MapBuilder::InsertImuMsg(const sensors::ImuMsg::Ptr& imu_msg) {
 
   if (!extrapolator_) {
     extrapolator_ = PoseExtrapolator::InitializeWithImu(
-        SimpleTime::from_sec(kExpolatorMinDuration),
+        SimpleTime::FromSec(kExpolatorMinDuration),
         options_.front_end_options.imu_options.gravity_constant, *imu_msg);
   } else {
     extrapolator_->AddImuData(*imu_msg);
   }
 }
 
-void MapBuilder::InsertOdomMsg(const sensors::OdomMsg::Ptr& odom_msg) {
+void MapBuilder::InsertOdomMsg(const data::OdomMsg::Ptr& odom_msg) {
   if (!use_odom_ || end_all_thread_.load()) {
     return;
   }
@@ -197,25 +198,11 @@ void MapBuilder::InsertOdomMsg(const sensors::OdomMsg::Ptr& odom_msg) {
   LOG(FATAL) << "This function is temporarily for very percise odom such as "
                 "INS-RTK, and only the pose will be used. If you are in the "
                 "same situation, you can comment this line and use this "
-                "function, it will be really helpful";
-
-  {
-    common::MutexLocker locker(&mutex_);
-    // odom_msgs_ are just for generating path file now
-    if (odom_msgs_.empty()) {
-      init_odom_msg_ = *odom_msg;
-    }
-    const Eigen::Matrix4d init_pose = init_odom_msg_.PoseInMatrix();
-    Eigen::Matrix4d relative_pose = init_pose.inverse() *
-                                    odom_msg->PoseInMatrix() *
-                                    tracking_to_odom_.inverse();
-    odom_msg->SetPose(relative_pose);
-    odom_msgs_.push_back(odom_msg);
-  }
+                "function, it will be really helpful.";
   data_collector_->AddSensorData(*odom_msg);
 }
 
-void MapBuilder::InsertGpsMsg(const sensors::NavSatFixMsg::Ptr& gps_msg) {
+void MapBuilder::InsertGpsMsg(const data::NavSatFixMsg::Ptr& gps_msg) {
   if (!use_gps_ || end_all_thread_.load()) {
     return;
   }
@@ -223,7 +210,7 @@ void MapBuilder::InsertGpsMsg(const sensors::NavSatFixMsg::Ptr& gps_msg) {
 }
 
 void MapBuilder::AddNewTrajectory() {
-  current_trajectory_.reset(new Trajectory<PointType>);
+  current_trajectory_.reset(new Trajectory);
   trajectories_.push_back(current_trajectory_);
   current_trajectory_->SetId(static_cast<int>(trajectories_.size()) - 1);
   CHECK_GE(current_trajectory_->GetId(), 0);
@@ -231,49 +218,40 @@ void MapBuilder::AddNewTrajectory() {
   PRINT_INFO_FMT("Add a new trajectory : %d", current_trajectory_->GetId());
 }
 
-void MapBuilder::InsertFrameForSubmap(const PointCloudPtr& cloud_ptr,
+void MapBuilder::InsertFrameForSubmap(InnerCloud::Ptr cloud_ptr,
                                       const Eigen::Matrix4d& global_pose,
                                       const double match_score) {
-  auto frame = std::make_shared<Frame<PointType>>();
+  auto frame = std::make_shared<Frame>();
   frame->SetCloud(cloud_ptr);
-  frame->CalculateDescriptor();
-  frame->SetTimeStamp(ToLocalTime(cloud_ptr->header.stamp));
+  frame->SetTimeStamp(cloud_ptr->GetTime());
   frame->SetGlobalPose(global_pose);
-
-  common::MutexLocker locker(&mutex_);
   frames_.push_back(frame);
 }
 
 namespace {
-void MotionCompensation(const MapBuilder::PointCloudPtr& raw_cloud,
-                        const float delta_time,
+void MotionCompensation(const data::InnerCloudType& raw_cloud,
                         const Eigen::Matrix4d& delta_transform,
-                        MapBuilder::PointCloudType* const output_cloud) {
-  CHECK(raw_cloud);
+                        data::InnerCloudType* const output_cloud) {
   CHECK(output_cloud);
-  CHECK_GT(delta_time, 1.e-6);
-  output_cloud->clear();
-  const size_t cloud_size = raw_cloud->size();
-  output_cloud->header = raw_cloud->header;
-  output_cloud->reserve(cloud_size);
+  output_cloud->points.clear();
+  const size_t cloud_size = raw_cloud.points.size();
+  output_cloud->stamp = raw_cloud.stamp;
+  output_cloud->points.reserve(cloud_size);
   for (size_t i = 0; i < cloud_size; ++i) {
-    const auto& point = raw_cloud->points[i];
-    float delta_factor = static_cast<float>(i) / static_cast<float>(cloud_size);
+    const auto& point = raw_cloud.points[i];
     const Eigen::Matrix4d transform = common::InterpolateTransform(
-        Eigen::Matrix4d::Identity().eval(), delta_transform, delta_factor);
+        Eigen::Matrix4d::Identity().eval(), delta_transform, point.factor);
     const Eigen::Vector3d new_point_start =
-        transform.block(0, 0, 3, 3) *
+        common::Rotation(transform) *
             Eigen::Vector3d(point.x, point.y, point.z) +
-        transform.block(0, 3, 3, 1);
+        common::Translation(transform);
 
-    const Eigen::Vector3d new_point_current =
-        delta_transform.block(0, 0, 3, 3).transpose() *
-        (new_point_start - delta_transform.block(0, 3, 3, 1));
-    MapBuilder::PointType new_point;
-    new_point.x = new_point_current[0];
-    new_point.y = new_point_current[1];
-    new_point.z = new_point_current[2];
+    data::InnerPointType new_point;
+    new_point.x = new_point_start[0];
+    new_point.y = new_point_start[1];
+    new_point.z = new_point_start[2];
     new_point.intensity = point.intensity;
+    new_point.factor = point.factor;
     output_cloud->points.push_back(new_point);
   }
 }
@@ -284,36 +262,37 @@ void MapBuilder::ScanMatchProcessing() {
 
   scan_match_thread_running_ = true;
 
-  PointCloudPtr target_cloud;
-  PointCloudPtr source_cloud;
+  InnerCloud::Ptr target_cloud;
+  InnerCloud::Ptr source_cloud;
   Pose3d pose_target = Pose3d::Identity();
   Pose3d accumulative_transform = Pose3d::Identity();
-  float source_cloud_delta_time = 0.;
-
-  bool first_in_accumulate = true;
   while (true) {
-    source_cloud = data_collector_->GetNewCloud(&source_cloud_delta_time);
-    if (source_cloud != nullptr) {
-      if (!got_first_point_cloud_) {
-        got_first_point_cloud_ = true;
-        target_cloud = source_cloud;
-        InsertFrameForSubmap(source_cloud, Eigen::Matrix4d::Identity(), 1.);
-
-        if (extrapolator_) {
-          extrapolator_->AddPose(ToLocalTime(source_cloud->header.stamp),
-                                 Eigen::Matrix4d::Identity());
-        }
-        continue;
-      }
-    } else {
+    auto new_inner_cloud = data_collector_->GetNewCloud();
+    if (new_inner_cloud == nullptr) {
       if (end_all_thread_.load()) {
         break;
       }
-      SimpleTime::from_sec(0.005).sleep();
+      SimpleTime::FromSec(0.005).Sleep();
       continue;
     }
 
-    const auto source_time = ToLocalTime(source_cloud->header.stamp);
+    source_cloud.reset(new InnerCloud(new_inner_cloud));
+    const auto source_time = source_cloud->GetTime();
+    if (!got_first_point_cloud_) {
+      got_first_point_cloud_ = true;
+      target_cloud = source_cloud;
+      // Only IcpFast need the pre-calculated normals of target cloud.
+      if (scan_matcher_->GetType() == registrator::Type::kFastIcp) {
+        target_cloud->CalculateNormals();
+      }
+      InsertFrameForSubmap(source_cloud, Eigen::Matrix4d::Identity(), 1.);
+      if (extrapolator_) {
+        extrapolator_->AddPose(source_time, Eigen::Matrix4d::Identity());
+      }
+      continue;
+    }
+
+    REGISTER_BLOCK("FrontEndOneFrame");
     if (extrapolator_ && source_time < extrapolator_->GetLastPoseTime()) {
       PRINT_INFO("Extrapolator still initialising...");
       target_cloud = source_cloud;
@@ -327,30 +306,27 @@ void MapBuilder::ScanMatchProcessing() {
 
     Pose3d guess = pose_target.inverse() * pose_source;
     common::NormalizeRotation(guess);
+    // common::PrintTransform(guess);
 
     // motion compensation using guess
     // still in test
-    // scan_matcher_->EnableInnerCompensation();
     Eigen::Matrix4d align_result = Eigen::Matrix4d::Identity();
+    auto inner_cloud_without_comp = source_cloud->GetInnerCloud();
     {
       REGISTER_BLOCK("scan match:target");
-
-      if (first_in_accumulate) {
-        scan_matcher_->SetInputTarget(target_cloud);
-        //   std::cout << target_cloud.get() << std::endl;
-      }
+      scan_matcher_->SetInputTarget(target_cloud);
 
       // && options_.front_end_options.motion_compensation_options.use_average
       if (options_.front_end_options.motion_compensation_options.enable) {
-        PointCloudType compensated_source_cloud;
+        data::InnerCloudType::Ptr compensated_source_cloud(
+            new data::InnerCloudType);
         const Pose3d motion_in_source_cloud =
             accumulative_transform.inverse() * guess;
-        MotionCompensation(source_cloud, source_cloud_delta_time,
-                           motion_in_source_cloud, &compensated_source_cloud);
-        scan_matcher_->SetInputSource(compensated_source_cloud.makeShared());
-      } else {
-        scan_matcher_->SetInputSource(source_cloud);
+        MotionCompensation(*inner_cloud_without_comp, motion_in_source_cloud,
+                           compensated_source_cloud.get());
+        source_cloud->SetInnerCloud(compensated_source_cloud);
       }
+      scan_matcher_->SetInputSource(source_cloud);
     }
     {
       REGISTER_BLOCK("scan match:align");
@@ -364,13 +340,15 @@ void MapBuilder::ScanMatchProcessing() {
         transforms.push_back(align_result);
         transforms.push_back(guess);
         average_transform = common::AverageTransforms(transforms);
+        align_result = average_transform;
       }
       // motion compensation using align result
-      PointCloudType compensated_source_cloud;
-      MotionCompensation(source_cloud, source_cloud_delta_time,
+      data::InnerCloudType::Ptr compensated_source_cloud(
+          new data::InnerCloudType);
+      MotionCompensation(*inner_cloud_without_comp,
                          accumulative_transform.inverse() * average_transform,
-                         &compensated_source_cloud);
-      *source_cloud = compensated_source_cloud;
+                         compensated_source_cloud.get());
+      source_cloud->SetInnerCloud(compensated_source_cloud);
     }
 
     pose_source = pose_target * align_result;
@@ -407,10 +385,10 @@ void MapBuilder::ScanMatchProcessing() {
 
       accumulative_transform = Pose3d::Identity();
       target_cloud = source_cloud;
-      first_in_accumulate = true;
+      if (scan_matcher_->GetType() == registrator::Type::kFastIcp) {
+        target_cloud->CalculateNormals();
+      }
       pose_target = pose_source;
-    } else {
-      first_in_accumulate = false;
     }
   }
 
@@ -421,17 +399,17 @@ void MapBuilder::ScanMatchProcessing() {
 void MapBuilder::SubmapPairMatch(const int source_index,
                                  const int target_index) {
   REGISTER_FUNC;
-  std::shared_ptr<Submap<PointType>> target_submap, source_submap;
+  std::shared_ptr<Submap> target_submap, source_submap;
   target_submap = current_trajectory_->at(target_index);
   source_submap = current_trajectory_->at(source_index);
 
   // init back end(submap to submap matcher)
-  std::shared_ptr<registrator::Interface<PointType>> matcher;
+  std::shared_ptr<registrator::Interface> matcher;
   {
     common::MutexLocker locker(&mutex_);
     // Creating a Matcher has some opertation on an instance of pugi::xml_node
     // and we do not known if it's threadsafe, so add a locker
-    matcher = registrator::CreateMatcher<PointType>(
+    matcher = registrator::CreateMatcher(
         options_.back_end_options.submap_matcher_options, false);
   }
   CHECK(matcher);
@@ -442,6 +420,9 @@ void MapBuilder::SubmapPairMatch(const int source_index,
     matcher->SetInputTarget(target_submap->Cloud());
   }
   Eigen::Matrix4d result = Eigen::Matrix4d::Identity();
+  // `GetFrames()[0]->GlobalPose()` means the first frame's global pose, and it
+  // will never be changed after scan matching. So it's actually safe to
+  // calculate the init estimation like this.
   Eigen::Matrix4d guess =
       target_submap->GetFrames()[0]->GlobalPose().inverse() *
       source_submap->GetFrames()[0]->GlobalPose();
@@ -465,9 +446,9 @@ void MapBuilder::SubmapPairMatch(const int source_index,
 }
 
 void MapBuilder::ConnectAllSubmap() {
-  // finish mens that its global pose is ready
+  // Finish means that its global pose is ready
   int current_finished_index = 0;
-  std::vector<std::shared_ptr<Submap<PointType>>> submaps_to_connect;
+  std::vector<std::shared_ptr<Submap>> submaps_to_connect;
   submaps_to_connect.reserve(20);
   bool first_inserted = false;
   while (true) {
@@ -476,7 +457,7 @@ void MapBuilder::ConnectAllSubmap() {
       if (submap_processing_done_.load()) {
         break;
       }
-      SimpleTime::from_sec(0.1).sleep();
+      SimpleTime::FromSec(0.1).Sleep();
       continue;
     }
 
@@ -497,20 +478,26 @@ void MapBuilder::ConnectAllSubmap() {
     }
 
     if (submaps_to_connect.size() <= 1) {
-      SimpleTime::from_sec(0.1).sleep();
+      SimpleTime::FromSec(0.1).Sleep();
       continue;
     }
     for (size_t i = 1; i < submaps_to_connect.size(); ++i) {
-      submaps_to_connect[i]->SetGlobalPose(
-          submaps_to_connect[i - 1]->GlobalPose() *
-          submaps_to_connect[i - 1]->TransformToNext());
-      submaps_to_connect[i]->SetTransformFromLast(
-          submaps_to_connect[i - 1]->TransformToNext());
+      auto& previous_submap = submaps_to_connect[i - 1];
+      auto& current_submap = submaps_to_connect[i];
+      current_submap->SetGlobalPose(previous_submap->GlobalPose() *
+                                    previous_submap->TransformToNext());
+      current_submap->SetTransformFromLast(previous_submap->TransformToNext());
       current_finished_index++;
 
       isam_optimizer_->AddFrame(
-          submaps_to_connect[i],
-          submaps_to_connect[i]->match_score_to_previous_submap_);
+          current_submap, current_submap->match_score_to_previous_submap_);
+
+      if (show_submap_function_) {
+        PointCloudPtr submap_cloud_pcl(new PointCloudType);
+        data::ToPclPointCloud(*(current_submap->Cloud()->GetInnerCloud()),
+                              submap_cloud_pcl.get());
+        show_submap_function_(submap_cloud_pcl, current_submap->GlobalPose());
+      }
     }
 
     if (show_path_function_) {
@@ -531,26 +518,42 @@ void MapBuilder::ConnectAllSubmap() {
           break;
         }
 
-        if ((submap->GlobalTranslation() -
-             current_trajectory_->at(current_finished_index)
-                 ->GlobalTranslation())
-                .norm() >= kLocalMapRange) {
+        const Eigen::Vector3d delta_translation =
+            submap->GlobalTranslation() -
+            current_trajectory_->at(current_finished_index)
+                ->GlobalTranslation();
+        if (delta_translation.topRows(2).norm() >= kLocalMapRange ||
+            std::fabs(delta_translation.z()) >= 2.) {
           continue;
         }
 
         PointCloudPtr transformed_cloud(new PointCloudType);
         Eigen::Matrix4d pose = submap->GlobalPose();
-        pcl::transformPointCloud(*(submap->Cloud()), *transformed_cloud, pose);
+
+        PointCloudPtr submap_cloud_pcl(new PointCloudType);
+        data::ToPclPointCloud(*(submap->Cloud()->GetInnerCloud()),
+                              submap_cloud_pcl.get());
+        pcl::transformPointCloud(*submap_cloud_pcl, *transformed_cloud, pose);
         *local_map += *transformed_cloud;
       }
 
+      // TODO(edward) show_map_function_ use inner point type instread of pcl
+      // cloud.
+      data::InnerCloudType::Ptr inner_filtered_final_cloud(
+          new data::InnerCloudType);
       PointCloudPtr filtered_final_cloud(new PointCloudType);
-      pre_processers::filter::RandomSampler<PointType> random_sample;
-      random_sample.SetInputCloud(local_map);
+      pre_processers::filter::RandomSampler random_sample;
+      auto inner_local_map = data::ToInnerPointCloud(*local_map);
+      random_sample.SetInputCloud(inner_local_map);
       random_sample.SetValue("sampling_rate", 0.05);
-      random_sample.Filter(filtered_final_cloud);
+      random_sample.Filter(inner_filtered_final_cloud);
+      data::ToPclPointCloud(*inner_filtered_final_cloud,
+                            filtered_final_cloud.get());
       show_map_function_(filtered_final_cloud);
-      filtered_final_cloud.reset();
+    }
+
+    if (show_edge_function_) {
+      show_edge_function_(isam_optimizer_->GetWholeGraph());
     }
   }
 
@@ -604,40 +607,8 @@ void MapBuilder::ConnectAllSubmap() {
   // @todo add a paramter for map filename
   GenerateMapPackage(options_.whole_options.map_package_path + "map.xml");
 
-  if (options_.map_package_options.enable) {
-    SaveMapPackage();
-  } else {
-    // output the whole map instead of seperated
-    MultiResolutionVoxelMap<PointType> map;
-    map.Initialise(options_.output_mrvm_settings);
-    // PointCloudPtr whole_map(new PointCloudType);
-    PointCloudPtr output_cloud(new PointCloudType);
-    const int submaps_size = current_trajectory_->size();
-    for (auto& submap : *current_trajectory_) {
-      std::cout << "submap index: " << submap->GetId().submap_index << " / "
-                << submaps_size - 1 << "\r" << std::flush;
-      {
-        // REGISTER_BLOCK("mrvp_insert_one_frame");
-        for (auto& frame : submap->GetFrames()) {
-          output_cloud->clear();
-          pcl::transformPointCloud(*(frame->Cloud()), *output_cloud,
-                                   frame->GlobalPose());
-          map.InsertPointCloud(output_cloud,
-                               frame->GlobalTranslation().cast<float>());
-          // *whole_map += *output_cloud;
-        }
-      }
-      submap->ClearCloud();
-      submap->ClearCloudInFrames();
-    }
-    PRINT_INFO("creating the whole static map ...");
-    map.OutputToPointCloud(
-        options_.output_mrvm_settings.prob_threshold,
-        options_.whole_options.export_file_path + "static_map.pcd");
-    // pcl::io::savePCDFileBinaryCompressed(
-    //     options_.whole_options.export_file_path + "whole_map.pcd",
-    //     *whole_map);
-  }
+  SaveMapPackage();
+  SaveMaps();
   data_collector_->ClearAllCloud();
 }
 
@@ -658,76 +629,62 @@ void MapBuilder::SubmapProcessing() {
   auto& submap_options = options_.back_end_options.submap_options;
   const int submap_frame_count = submap_options.frame_count;
 
-  std::unique_ptr<MemoryManager<PointType>> submap_mem_manager;
+  std::unique_ptr<MemoryManager> submap_mem_manager;
   if (options_.back_end_options.submap_options.enable_disk_saving) {
-    submap_mem_manager.reset(new MemoryManager<PointType>(&trajectories_));
+    submap_mem_manager.reset(new MemoryManager(&trajectories_));
   }
 
   size_t current_index = 0;
-  std::vector<std::shared_ptr<Frame<PointType>>> local_frames;
   common::ThreadPool submap_match_thread_pool(6);
   // there is a deamon thread in this thread pool
   // it is to connect all submap into a global map
   // others are for submap matching
   submap_match_thread_pool.enqueue([&]() { ConnectAllSubmap(); });
 
-  size_t frames_size = 0;
   while (true) {
-    {
-      common::MutexLocker locker(&mutex_);
-      frames_size = frames_.size();
-    }
+    const int frames_size = frames_.size();
     if (frames_size - current_index < submap_frame_count) {
       if (!scan_match_thread_running_.load()) {
         PRINT_INFO("no enough frames for new submap, quit");
         break;
       }
-      SimpleTime::from_sec(0.5).sleep();
+      SimpleTime::FromSec(0.5).Sleep();
       continue;
     }
 
-    for (int i = 0; i < submap_frame_count; ++i) {
-      local_frames.push_back(frames_[current_index]);
-      current_index++;
-    }
-
-    // Adding new submap
-    std::shared_ptr<Submap<PointType>> submap(
-        new Submap<PointType>(submap_options));
+    // Adding new submap using some frames.
+    std::shared_ptr<Submap> submap(new Submap(submap_options));
     SubmapId current_id;
     current_id.trajectory_index = current_trajectory_->GetId();
     auto& current_submap_index = current_id.submap_index;
     current_submap_index = current_trajectory_->size();
     submap->SetId(current_id);
     submap->SetSavePath(options_.whole_options.map_package_path);
-    current_trajectory_->push_back(submap);
     // create a submap and init with the configs
     PRINT_DEBUG_FMT("Add a new submap : %d", current_submap_index);
-
-    for (const auto& frame : local_frames) {
-      submap->InsertFrame(frame);
+    for (int i = 0; i < submap_frame_count; ++i) {
+      submap->InsertFrame(frames_[current_index]);
+      current_index++;
     }
     CHECK(submap->Full());
     submap->CalculateDescriptor();
 
     const auto time = submap->GetTimeStamp();
     if (use_gps_) {
-      const auto gps_enu = data_collector_->InterpolateGps(time, 0.005, true);
+      const auto gps_enu = data_collector_->InterpolateGps(time, 0.001, true);
       if (gps_enu) {
         submap->SetRelatedGpsInENU(*gps_enu);
       }
     }
     if (use_odom_) {
-      const auto odom = data_collector_->InterpolateOdom(time, 0.005, true);
+      const auto odom = data_collector_->InterpolateOdom(time, 0.001, true);
       if (odom) {
         submap->SetRelatedOdom(*odom);
       }
     }
 
-    local_frames.clear();
-    if (show_submap_function_) {
-      show_submap_function_(submap->GetFrames()[0]->Cloud());
-    }
+    // Submap constructing finished, add to trajectory.
+    current_trajectory_->push_back(submap);
     if (current_submap_index > 0) {
       submap_match_thread_pool.enqueue([=]() {
         SubmapPairMatch(current_submap_index, current_submap_index - 1);
@@ -744,10 +701,10 @@ void MapBuilder::FinishAllComputations() {
 
   size_t remaining_pointcloud_count = data_collector_->GetRemainingCloudSize();
   int delay = 0;
-  SimpleTime delay_time = SimpleTime::from_sec(0.1);
+  SimpleTime delay_time = SimpleTime::FromSec(0.1);
   if (scan_match_thread_) {
     do {
-      delay_time.sleep();
+      delay_time.Sleep();
       delay++;
       if (delay >= 20) {
         std::ostringstream progress_info;
@@ -779,13 +736,6 @@ void MapBuilder::CalculateCoordTransformToGps() {
   // @todo(edward) get gps origin
   const Eigen::Matrix4d map_enu_transform =
       isam_optimizer_->GetGpsCoordTransform();
-  const Eigen::Vector3d map_enu_translation =
-      common::Translation(map_enu_transform);
-  // output the result to file( txt or xml ).
-  PRINT_INFO_FMT("enu translation: %.12lf, %.12lf, %.12lf",
-                 map_enu_translation[0], map_enu_translation[1],
-                 map_enu_translation[2]);
-
   // update the submap pose and frame pose
   for (auto& submap : *current_trajectory_) {
     Eigen::Matrix4d new_submap_pose = map_enu_transform * submap->GlobalPose();
@@ -794,26 +744,27 @@ void MapBuilder::CalculateCoordTransformToGps() {
   }
 }
 
-void MapBuilder::SetShowMapFunction(const MapBuilder::ShowMapFunction& func) {
+void MapBuilder::SetShowMapFunction(const ShowMapFunction& func) {
   show_map_function_ = std::move(func);
 }
 
-void MapBuilder::SetShowPathFunction(const MapBuilder::ShowPathFunction& func) {
+void MapBuilder::SetShowPathFunction(const ShowPathFunction& func) {
   show_path_function_ = std::move(func);
 }
 
-void MapBuilder::SetShowSubmapFunction(
-    const MapBuilder::ShowMapFunction& func) {
+void MapBuilder::SetShowSubmapFunction(const ShowSubmapFunction& func) {
   show_submap_function_ = std::move(func);
+}
+
+void MapBuilder::SetShowEdgeFunction(const ShowEdgeFunction& func) {
+  show_edge_function_ = std::move(func);
 }
 
 void MapBuilder::EnableUsingOdom(bool flag) {
   use_odom_ = flag;
   std::string str = flag ? "enable" : "disable";
   PRINT_INFO_FMT("%s odom.", str.c_str());
-  if (flag) {
-    odom_msgs_.reserve(kOdomMsgMaxSize);
-  } else {
+  if (!flag) {
     options_.back_end_options.isam_optimizer_options.use_odom = false;
   }
 }
@@ -846,9 +797,100 @@ void MapBuilder::GenerateMapPackage(const std::string& filename) {
 }
 
 void MapBuilder::SaveMapPackage() {
+  if (!options_.map_package_options.enable) {
+    return;
+  }
   SaveTrajectoriesAsMapPackage(trajectories_, options_.map_package_options,
                                options_.output_mrvm_settings,
                                options_.whole_options.export_file_path);
+}
+
+void MapBuilder::SaveMaps() {
+  if (!options_.whole_options.output_direct_combined_map &&
+      !options_.whole_options.output_mrvm) {
+    PRINT_INFO("Output nothing according to config.");
+    return;
+  }
+
+  std::shared_ptr<MultiResolutionVoxelMap> mrvm_map(
+      new MultiResolutionVoxelMap());
+  mrvm_map->Initialise(options_.output_mrvm_settings);
+  PointCloudPtr whole_map(new PointCloudType);
+  const int submaps_size = current_trajectory_->size();
+  for (auto& submap : *current_trajectory_) {
+    const int submap_idx = submap->GetId().submap_index;
+    std::cout << "submap index: " << submap_idx << " / " << submaps_size - 1
+              << "\r" << std::flush;
+    for (auto& frame : submap->GetFrames()) {
+      data::InnerCloudType::Ptr output_cloud(new data::InnerCloudType);
+      frame->Cloud()->GetInnerCloud()->ApplyTransformToOutput(
+          frame->GlobalPose(), output_cloud.get());
+      if (options_.whole_options.output_mrvm) {
+        // REGISTER_BLOCK("mrvp_insert_one_frame");
+        mrvm_map->InsertPointCloud(output_cloud,
+                                   frame->GlobalTranslation().cast<float>());
+      }
+      if (options_.whole_options.output_direct_combined_map) {
+        PointCloudType pcl_output_cloud;
+        data::ToPclPointCloud(*output_cloud, &pcl_output_cloud);
+        *whole_map += pcl_output_cloud;
+      }
+    }
+
+    if (options_.whole_options.separate_output) {
+      if (submap_idx == submaps_size - 1 ||
+          (submap_idx + 1) % options_.whole_options.separate_step == 0) {
+        const int map_part_index =
+            submap_idx / options_.whole_options.separate_step;
+        const int used_submap_count =
+            submap_idx % options_.whole_options.separate_step + 1;
+
+        if (options_.whole_options.output_direct_combined_map) {
+          if (whole_map && !whole_map->empty()) {
+            PRINT_INFO_FMT("creating part map: %d with %d submaps.",
+                           map_part_index, used_submap_count);
+            pcl::io::savePCDFileBinaryCompressed(
+                options_.whole_options.export_file_path + "part_map_" +
+                    std::to_string(map_part_index) + ".pcd",
+                *whole_map);
+            whole_map.reset(new PointCloudType);
+          } else {
+            PRINT_INFO_FMT("failed creating part map: %d with %d submaps.",
+                           map_part_index, used_submap_count);
+          }
+        }
+        if (options_.whole_options.output_mrvm && mrvm_map != nullptr) {
+          PRINT_INFO_FMT("creating static part map: %d with %d submaps.",
+                         map_part_index, used_submap_count);
+          mrvm_map->OutputToPointCloud(
+              options_.output_mrvm_settings.prob_threshold,
+              options_.whole_options.export_file_path + "static_part_map_" +
+                  std::to_string(map_part_index) + ".pcd");
+
+          mrvm_map.reset(new MultiResolutionVoxelMap());
+          mrvm_map->Initialise(options_.output_mrvm_settings);
+        }
+      }
+    }
+
+    submap->ClearCloud();
+    submap->ClearCloudInFrames();
+  }
+  if (!options_.whole_options.separate_output) {
+    if (options_.whole_options.output_mrvm) {
+      PRINT_INFO("creating the static map ...");
+      mrvm_map->OutputToPointCloud(
+          options_.output_mrvm_settings.prob_threshold,
+          options_.whole_options.export_file_path + "static_map.pcd");
+    }
+    if (options_.whole_options.output_direct_combined_map &&
+        !whole_map->empty()) {
+      PRINT_INFO("creating the whole map ...");
+      pcl::io::savePCDFileBinaryCompressed(
+          options_.whole_options.export_file_path + "whole_map.pcd",
+          *whole_map);
+    }
+  }
 }
 
 }  // namespace static_map

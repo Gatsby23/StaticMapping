@@ -34,16 +34,17 @@ namespace registrator {
 
 struct IcpUsingPointMatcherMem;
 
-template <typename PointType>
-class IcpUsingPointMatcher : public Interface<PointType> {
+class IcpUsingPointMatcher : public Interface {
  public:
   USE_REGISTRATOR_CLOUDS;
 
   explicit IcpUsingPointMatcher(const std::string& ymal_file = "");
   ~IcpUsingPointMatcher();
 
-  void SetInputSource(const PointCloudSourcePtr& cloud) override;
-  void SetInputTarget(const PointCloudTargetPtr& cloud) override;
+  PROHIBIT_COPY_AND_ASSIGN(IcpUsingPointMatcher);
+
+  void SetInputSource(InnerCloudPtr cloud) override;
+  void SetInputTarget(InnerCloudPtr cloud) override;
   bool Align(const Eigen::Matrix4d& guess, Eigen::Matrix4d& result) override;
 
  protected:

@@ -28,7 +28,8 @@
 #include <memory>
 #include <string>
 // local
-#include <boost/optional.hpp>
+#include "boost/optional.hpp"
+#include "builder/data/data_types.h"
 #include "common/math.h"
 #include "common/simple_time.h"
 #include "descriptor/m2dp.h"
@@ -45,13 +46,11 @@ using OdomPose = Eigen::Matrix4d;
  * @brief base class for all frames, such as frame, submap,
  * a simple frame has its global pose(in map), local pose, cloud and
  * descriptor
+ * @todo(edward) Make this class thread-safe
  */
-template <typename PointType>
 class FrameBase {
  public:
-  using PointCloudType = pcl::PointCloud<PointType>;
-  using PointCloudPtr = typename PointCloudType::Ptr;
-  using PointCloudConstPtr = typename PointCloudType::ConstPtr;
+  using InnerCloudPtr = data::InnerPointCloudData::Ptr;
 
   FrameBase()
       : global_pose_(Eigen::Matrix4d::Identity()),
@@ -74,14 +73,14 @@ class FrameBase {
   void SetLocalPose(const Eigen::Matrix4d& t);
 
   // cloud
-  virtual PointCloudPtr Cloud() = 0;
+  virtual InnerCloudPtr Cloud() = 0;
   virtual void ToPcdFile(const std::string& filename);
-  void SetCloud(const PointCloudPtr& cloud);
+  void SetCloud(InnerCloudPtr cloud);
   void ClearCloud();
 
   // descriptor (m2dp)
-  typename descriptor::M2dp<PointType>::Descriptor GetDescriptor() const;
-  void SetDescriptor(const typename descriptor::M2dp<PointType>::Descriptor& d);
+  descriptor::M2dp::Descriptor GetDescriptor() const;
+  void SetDescriptor(const descriptor::M2dp::Descriptor& d);
   void CalculateDescriptor();
 
   // transform between last&next
@@ -110,16 +109,14 @@ class FrameBase {
   Eigen::Matrix4d local_pose_;
   Eigen::Matrix4d transform_from_last_frame_;
   Eigen::Matrix4d transform_to_next_frame_;
-  PointCloudPtr cloud_;
+  InnerCloudPtr inner_cloud_;
   SimpleTime stamp_;
-  typename descriptor::M2dp<PointType>::Descriptor descriptor_;
+  descriptor::M2dp::Descriptor descriptor_;
 
   boost::optional<EnuPosition> related_enu_;
   boost::optional<OdomPose> related_odom_;
 };
 
 }  // namespace static_map
-
-#include "builder/frame_base_impl.h"
 
 #endif  // BUILDER_FRAME_BASE_H_

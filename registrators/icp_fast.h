@@ -26,17 +26,16 @@
 #include <memory>
 #include <vector>
 
+#include "builder/data/cloud_types.h"
 #include "nabo/nabo.h"
 #include "registrators/interface.h"
 
 namespace static_map {
 namespace registrator {
 
-struct BuildData;
 using NNS = Nabo::NearestNeighbourSearch<double>;
 
-template <typename PointType>
-class IcpFast : public Interface<PointType> {
+class IcpFast : public Interface {
  public:
   USE_REGISTRATOR_CLOUDS;
 
@@ -45,13 +44,13 @@ class IcpFast : public Interface<PointType> {
 
   PROHIBIT_COPY_AND_ASSIGN(IcpFast);
 
-  void SetInputSource(const PointCloudSourcePtr& cloud) override;
-  void SetInputTarget(const PointCloudTargetPtr& cloud) override;
+  void SetInputSource(InnerCloudPtr cloud) override;
+  void SetInputTarget(InnerCloudPtr cloud) override;
   bool Align(const Eigen::Matrix4d& guess, Eigen::Matrix4d& result) override;
 
  private:
-  std::shared_ptr<BuildData> source_cloud_;
-  std::shared_ptr<BuildData> target_cloud_;
+  data::EigenPointCloud::Ptr source_cloud_;
+  data::EigenPointCloud::Ptr target_cloud_;
   std::shared_ptr<NNS> nns_kdtree_;
 
   struct {

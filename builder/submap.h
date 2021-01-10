@@ -23,11 +23,6 @@
 #ifndef BUILDER_SUBMAP_H_
 #define BUILDER_SUBMAP_H_
 
-// third party
-#include <pcl/filters/approximate_voxel_grid.h>
-#include <pcl/filters/random_sample.h>
-#include <pcl/io/pcd_io.h>
-#include <pcl/io/vtk_io.h>
 // stl
 #include <atomic>
 #include <memory>
@@ -41,8 +36,6 @@
 #include "builder/submap_options.h"
 #include "common/mutex.h"
 
-#include <boost/thread/pthread/shared_mutex.hpp>
-
 namespace static_map {
 
 struct SubmapId {
@@ -55,22 +48,12 @@ struct SubmapId {
   std::string DebugString() const;
 };
 
-template <typename PointType>
-class Submap : public FrameBase<PointType> {
+class Submap : public FrameBase {
  public:
-  using PointCloudType = pcl::PointCloud<PointType>;
-  using PointCloudPtr = typename PointCloudType::Ptr;
-  using PointCloudConstPtr = typename PointCloudType::ConstPtr;
-
-  /// read write mutex
-  /// when there is no writing in progress, several thread can access (read) the
-  /// memory at the same time
-  using ReadWriteMutex = boost::shared_mutex;
-  using ReadMutexLocker = boost::shared_lock<ReadWriteMutex>;
-  using WriteMutexLocker = boost::upgrade_to_unique_lock<ReadWriteMutex>;
+  using InnerCloudPtr = typename data::InnerPointCloudData::Ptr;
 
   explicit Submap(const SubmapOptions& options);
-  ~Submap();
+  ~Submap() = default;
 
   PROHIBIT_COPY_AND_ASSIGN(Submap);
 
@@ -80,12 +63,10 @@ class Submap : public FrameBase<PointType> {
   SubmapId GetId() { return id_; }
   /// @brief save the inner cloud into a pcd file
   void ToPcdFile(const std::string& filename) override;
-  /// @brief save the inner cloud into a vtk file
-  void ToVtkFile(const std::string& filename);
   /// @brief save all information including cloud data into a give file
   void ToInfoFile(const std::string& filename);
   /// @brief insert single cloud frame into the submap
-  void InsertFrame(const std::shared_ptr<Frame<PointType>>& frame);
+  void InsertFrame(const std::shared_ptr<Frame>& frame);
   /// @brief clean the cloud data in frames (for saving RAM) only if the
   /// submap cloud data is stable
   void ClearCloudInFrames();
@@ -101,12 +82,12 @@ class Submap : public FrameBase<PointType> {
     return got_matched_transform_to_next_.load();
   }
   /// @brief get all frames inserted into the submap
-  std::vector<std::shared_ptr<Frame<PointType>>>& GetFrames();
+  std::vector<std::shared_ptr<Frame>>& GetFrames();
   /// @brief get single frame in submap according to its id
-  std::shared_ptr<Frame<PointType>> GetFrame(const FrameId& frame_id);
+  std::shared_ptr<Frame> GetFrame(const FrameId& frame_id);
   /// @brief we do not just return the cloud
   /// @notice we update the active status and inactive time in this function
-  PointCloudPtr Cloud() override;
+  InnerCloudPtr Cloud() override;
   /// @brief we manage all submaps' memory in a single thread
   /// and this managing thread tells each submap how long has it been waited
   bool UpdateInactiveTime(const int update_time_in_sec);
@@ -129,15 +110,14 @@ class Submap : public FrameBase<PointType> {
   double match_score_to_previous_submap_ = 0.;
 
  private:
-  ReadWriteMutex mutex_;
-  std::vector<std::shared_ptr<Frame<PointType>>> frames_;
+  common::ReadWriteMutex mutex_;
+  std::vector<std::shared_ptr<Frame>> frames_;
 
   SubmapOptions options_;
   SubmapId id_;
   std::string save_filename_;
   std::string save_path_;
   std::atomic<bool> full_;
-  std::atomic<bool> is_cloud_in_memory_;
   std::atomic<bool> got_matched_transform_to_next_;
   std::atomic<int> cloud_inactive_time_;
 

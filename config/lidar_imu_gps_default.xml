@@ -3,7 +3,8 @@
   <static_mapping>
     <whole_options 
       export_file_path="pcd/"
-      map_package_path="pkgs/test/" />
+      map_package_path="pkgs/test/"
+      output_mrvm="false" />
     <map_package_options
       enable="false"
       border_offset="100"
@@ -15,7 +16,7 @@
         0 : int
         1 : float  -->
       <filter name="Range" >
-        <param type="1" name="max_range"> 75. </param>
+        <param type="1" name="max_range"> 80. </param>
         <param type="1" name="min_range"> 4.5 </param>
       </filter>
       <filter name="RandomSampler" >
@@ -37,23 +38,6 @@
           <param name="knn_normal_estimate"> 7 </param>
           <param name="max_iteration"> 100 </param>
         </registrator_options>
-        <inner_filters>
-          <filter name="GroundRemoval2" >
-            <param type="1" name="r_min"> 0.1 </param>
-            <param type="1" name="start_ground_height"> -0.35 </param>
-            <param type="1" name="long_line_threshold"> 10 </param>
-            <param type="1" name="max_slope"> 0.12 </param>
-            <param type="1" name="max_error"> 0.1 </param>
-            <param type="1" name="max_dist_to_line"> 0.10 </param>
-            <param type="1" name="max_start_height"> 0.6 </param>
-            <param type="0" name="thread_num"> 4 </param>
-          </filter>
-          <filter name="RangeImage" >
-            <param type="1" name="top_angle"> 30. </param>
-            <param type="1" name="btm_angle"> -20. </param>
-            <param type="0" name="vertical_line_num"> 60 </param>
-          </filter>
-        </inner_filters>
       </scan_matcher_options>
       <!-- translation unit: m
            angle unit: degree -->
@@ -76,7 +60,7 @@
       <!-- type just the same as front end -->
       <submap_matcher_options 
         type="6"
-        accepted_min_score="0.75">
+        accepted_min_score="0.7">
         <registrator_options type = "6">
           <param name="dist_outlier_ratio"> 0.7 </param>
           <param name="knn_normal_estimate"> 7 </param>
@@ -85,25 +69,29 @@
       </submap_matcher_options>
       <submap_options 
         frame_count="2"
-        enable_inner_multiview_icp="false"
         enable_voxel_filter="true"
         enable_random_sampleing="false"
         enable_check="false"
         random_sampling_rate="0.5"
-        enable_disk_saving="false"
-        disk_saving_delay="30"
+        enable_disk_saving="true"
+        disk_saving_delay="10"
         saving_name_prefix="s_" />
       <isam_optimizer_options 
         use_odom="false"
-        use_gps="true" />
+        use_gps="true" 
+        output_graph_pic="false"
+        enable_extrinsic_calib="true"
+        gps_factor_init_num="25"
+        gps_factor_sample_step="2"
+        gps_factor_init_angle_rad="1.5" />
       <loop_detector_setting 
-        use_gps="true"
+        use_gps="false"
         use_descriptor="true"
         output_matched_cloud="false"
         loop_ignore_threshold="20"
         trying_detect_loop_count="1"
-        max_close_loop_distance="15."
-        max_close_loop_z_distance="5."
+        max_close_loop_distance="8."
+        max_close_loop_z_distance="3."
         m2dp_match_score="0.97"
         accept_scan_match_score="0.8"
         nearest_history_pos_num="5" />

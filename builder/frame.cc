@@ -24,20 +24,40 @@
 
 namespace static_map {
 
-template <typename PointType>
-void Frame<PointType>::ToPcdFile(const std::string& filename) {
-  if (!filename.empty()) {
-    pcl::io::savePCDFileASCII(filename, *this->cloud_);
-  } else {
-    pcl::io::savePCDFileASCII(id_.DebugString() + ".pcd", *this->cloud_);
-  }
+bool FrameId::operator==(const FrameId& other) const {
+  return (trajectory_index == other.trajectory_index &&
+          submap_index == other.submap_index &&
+          frame_index == other.frame_index);
 }
 
-template <typename PointType>
-typename Frame<PointType>::PointCloudPtr Frame<PointType>::Cloud() {
-  return this->cloud_;
+bool FrameId::operator!=(const FrameId& other) const {
+  return !operator==(other);
 }
 
-template class Frame<pcl::PointXYZI>;
+bool FrameId::operator<(const FrameId& other) const {
+  return std::forward_as_tuple(trajectory_index, submap_index, frame_index) <
+         std::forward_as_tuple(other.trajectory_index, other.submap_index,
+                               other.frame_index);
+}
+
+std::string FrameId::DebugString() const {
+  std::ostringstream out;
+  out << "f_" << trajectory_index << "_" << submap_index << "_" << frame_index;
+  return out.str();
+}
+
+Frame::Frame() : FrameBase() {}
+
+void Frame::ToPcdFile(const std::string& filename) {
+  CHECK(this->inner_cloud_ && !this->inner_cloud_->Empty());
+  const std::string actual_filename =
+      filename.empty() ? id_.DebugString() + ".bin" : filename;
+  this->inner_cloud_->SaveToFile(actual_filename);
+}
+
+typename Frame::InnerCloudPtr Frame::Cloud() {
+  CHECK(this->inner_cloud_ && this->inner_cloud_->CloudInMemory());
+  return this->inner_cloud_;
+}
 
 }  // namespace static_map

@@ -54,31 +54,31 @@ struct ImuMsg;
 
 namespace back_end {
 
-template <typename PointT>
 class LoopDetector;
 
 struct IsamOptimizerOptions {
   bool use_odom = false;
   bool use_gps = false;
   bool output_graph_pic = false;
-  int gps_skip_num = 25;
+  bool enable_extrinsic_calib = true;
+  int gps_factor_init_num = 25;
+  int gps_factor_sample_step = 1;
+  double gps_factor_init_angle_rad = 1.6;
 };
 
-template <typename PointT>
 class IsamOptimizer {
  public:
   IsamOptimizer(const IsamOptimizerOptions &options,
                 const LoopDetectorSettings &l_d_setting);
-  ~IsamOptimizer() {}
+  ~IsamOptimizer() = default;
 
   IsamOptimizer(const IsamOptimizer &) = delete;
   IsamOptimizer &operator=(const IsamOptimizer &) = delete;
 
   /// @brief add a new vertex
-  void AddFrame(const std::shared_ptr<Submap<PointT>> &frame,
-                const double match_score);
+  void AddFrame(const std::shared_ptr<Submap> &frame, const double match_score);
   /// @brief for imu factor in optimization
-  void AddImuData(const sensors::ImuMsg &imu_msg);
+  void AddImuData(const data::ImuMsg &imu_msg);
   /// @brief set static tf link from odom to lidar(cloud frame)
   void SetTransformOdomToLidar(const Eigen::Matrix4d &t);
   /// @brief get the odom->lidar tf after calibration
@@ -89,6 +89,8 @@ class IsamOptimizer {
   void RunFinalOptimazation();
 
   Eigen::Matrix4d GetGpsCoordTransform();
+
+  std::map<int64_t, ViewGraph::GraphItem> GetWholeGraph() const;
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
@@ -112,7 +114,8 @@ class IsamOptimizer {
   std::unique_ptr<gtsam::ISAM2> isam_;
   std::shared_ptr<gtsam::NonlinearFactorGraph> isam_factor_graph_;
   gtsam::Values initial_estimate_;
-  gtsam::Pose3 gps_coord_transform_;  // map origin in GPS coord
+  // map origin in GPS coord
+  gtsam::Pose3 gps_coord_transform_;
   gtsam::noiseModel::Base::shared_ptr prior_noise_model_;
   gtsam::noiseModel::Base::shared_ptr gps_noise_model_;
   gtsam::noiseModel::Base::shared_ptr frame_match_noise_model_;
@@ -124,7 +127,7 @@ class IsamOptimizer {
   Eigen::Matrix4d tf_odom_lidar_ = Eigen::Matrix4d::Identity();
   Eigen::Matrix4d tf_tracking_gps_ = Eigen::Matrix4d::Identity();
 
-  std::unique_ptr<LoopDetector<PointT>> loop_detector_;
+  std::unique_ptr<LoopDetector> loop_detector_;
   IsamOptimizerOptions options_;
 
   std::map<int /* frame index*/, EnuPosition> cached_enu_;
